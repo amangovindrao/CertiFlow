@@ -1,0 +1,37 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+*.spec
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- CertiFlow runtime data (machine-specific, not for version control) ----
+company/*.json
+company/*.db
+company/*.tmp
+logs/*.log
+output/*
+!output/.gitkeep
+
+# Keep the example config and empty folder placeholders
+!company/company.example.json
+!**/.gitkeep
+
+# User-uploaded private assets (signatures / stamps are personal)
+assets/signature/*
+assets/stamp/*
+!assets/signature/.gitkeep
+!assets/stamp/.gitkeep
