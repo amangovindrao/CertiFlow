@@ -32,6 +32,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import utils
 from pdf_generator import PDFGenerator
+import doc_router
 
 try:
     import openpyxl
@@ -288,6 +289,14 @@ class BulkGenerator:
         self.pdf = PDFGenerator(base_dir)
         self.logger = get_logger(base_dir)
         self.db = db  # optional InternDatabase for ID allocation + records
+        # Certificate store (shares the same DB file) for completion certs.
+        self.cert_store = None
+        if db is not None:
+            try:
+                from certificate_generator import CertificateStore
+                self.cert_store = CertificateStore(db.db_path)
+            except Exception:
+                self.cert_store = None
 
     def _to_form_data(self, row: Dict[str, str]) -> Dict[str, str]:
         """Map an import row to the data dict the templates expect."""
@@ -327,15 +336,26 @@ class BulkGenerator:
             stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             try:
                 data = self._to_form_data(row)
-                # Allocate a unique Intern ID when a database is available.
+                data["template"] = template_label
+                parsed = utils.parse_date(data.get("issue_date", ""))
+                year = parsed.year if parsed else datetime.now().year
+                # Reuse an existing Intern ID for a known name, else allocate.
                 if self.db is not None:
-                    parsed = utils.parse_date(data.get("issue_date", ""))
-                    year = parsed.year if parsed else datetime.now().year
-                    data["intern_id"] = self.db.next_intern_id(year)
-                base = utils.build_filename(name, "Offer_Letter")
+                    existing = self.db.get_by_name(name)
+                    if existing and existing.get("intern_id"):
+                        data["intern_id"] = existing["intern_id"]
+                    else:
+                        data["intern_id"] = self.db.next_intern_id(year)
+                # Completion certificates need a certificate number.
+                if doc_router.is_landscape_cert(template_label) and \
+                        self.cert_store is not None:
+                    data["cert_no"] = self.cert_store.next_cert_no(year)
+                base = utils.build_filename(
+                    name, doc_router.filename_suffix(template_label))
                 # unique_path guarantees (1), (2)… - never overwrites.
                 path = utils.unique_path(folder, base)
-                self.pdf.generate(path, company, data, template_label)
+                doc_router.render(path, company, data, template_label,
+                                  self.base_dir, self.pdf)
                 if self.db is not None:
                     self.db.add_record({
                         "intern_id": data.get("intern_id", ""),
@@ -349,6 +369,10 @@ class BulkGenerator:
                         "pdf_path": str(path),
                         "status": "Generated",
                     })
+                if doc_router.is_landscape_cert(template_label) and \
+                        self.cert_store is not None:
+                    self.cert_store.add_record({**data, "pdf_path": str(path),
+                                                "status": "Completed"})
                 report.succeeded.append(
                     {"candidate_name": name, "file": path.name, "time": stamp})
                 self.logger.info("OK   | %-30s | %s", name, path.name)

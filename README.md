@@ -50,15 +50,16 @@
 
 | | Feature | Description |
 |---|---|---|
-| 📝 | **Single Letter Generator** | Fill a clean form and generate a polished PDF in under a minute. |
-| ⚡ | **Bulk Generator** | Import an Excel/CSV **or type candidates manually**, then generate hundreds of letters at once on a background thread. |
+| 📝 | **Single Document Generator** | Pick a document type, fill a clean form, and generate a polished PDF in under a minute. |
+| 🎓 | **Certificate of Completion** | A premium A4 **landscape** certificate engine, available right from the document dropdown. |
+| ⚡ | **Bulk Generator** | Import Excel/CSV, **type candidates manually**, or **load existing candidates** from the database, then generate hundreds at once on a background thread. |
+| 🪪 | **Smart Intern IDs** | Gap-free, never-duplicated IDs that **auto-match by name** — the same person keeps one ID across their offer letter and certificate. |
+| 🔁 | **Generate Another** | From the document library, create a different document for any candidate, reusing their stored data and Intern ID. |
 | 🔎 | **Intern Verification** | Look up any issued document offline by its unique Intern ID (e.g. `SO260001`). |
-| 🪪 | **Auto Intern IDs** | Gap-free, never-duplicated IDs that keep counting across restarts, stored in SQLite. |
-| 🎨 | **Premium Branding** | Logo header, faint watermark, embedded signature, and an auto-generated circular company seal. |
-| 🗂 | **9 Templates** | Offer letters, certificates, experience/relieving letters, NDA — all sharing one brand identity. |
+| 🎨 | **Premium Branding** | Logo header, faint watermark, embedded signature, and an auto-generated / uploadable company seal. |
 | 🧮 | **Smart Dates** | Searchable position dropdown, duration → auto end-date (real month math), masked date input. |
 | 🌓 | **Light / Dark Theme** | Remembered between sessions. |
-| 📁 | **Document Library** | Search, sort, open, reveal-in-folder and delete every generated PDF (single **and** bulk). |
+| 📁 | **Document Library** | Search, sort, open, reveal-in-folder and delete every generated PDF (single **and** bulk, including dated sub-folders). |
 | 🧾 | **Audit Log** | Every generation is recorded in `logs/generation.log`. |
 | 🔧 | **Configurable** | Footer color and signature font are selectable from the settings panel. |
 | 🔌 | **100% Offline** | No servers, no accounts, no internet required. |
@@ -160,9 +161,11 @@ flowchart TD
 | `app.py` | Thin bootstrap — ensures folders exist, launches the UI. |
 | `ui.py` | CustomTkinter window, navigation, all pages and shared widgets. |
 | `bulk_ui.py` | Bulk Generator page: manual-entry form, editable table, progress window. |
-| `pdf_generator.py` | ReportLab template framework — branding, seal, watermark, every document type. |
+| `pdf_generator.py` | ReportLab template framework — branding, seal, watermark, portrait documents. |
+| `certificate_generator.py` | Premium A4 **landscape** Certificate of Completion + its certificate-number store. |
+| `doc_router.py` | Single source of truth for document types; routes each to the right renderer + file name. |
 | `bulk_generator.py` | Excel/CSV import, validation, threaded batch generation, dated folders, logging. |
-| `database.py` | SQLite layer for unique Intern IDs and verifiable records. |
+| `database.py` | SQLite layer for unique Intern IDs, name lookup and verifiable records. |
 | `settings.py` | Company profile + app preferences (JSON), asset auto-loading. |
 | `utils.py` | Date math, filename de-duplication, validation, OS integration. |
 
@@ -213,16 +216,16 @@ On first launch you'll be guided to **Company Settings** — fill it in once and
 ### 1) Company Settings (one time)
 Open **🏢 Company Settings** and enter your company name, contact details and HR name. Upload your **logo, watermark, signature** and (optionally) a **stamp** — they're saved to `assets/` and auto-loaded on every launch. Choose your **footer text color** and **ScaleOn signature font**, then **Save**.
 
-### 2) Generate a single letter
+### 2) Generate a single document
 1. Go to **📝 New Letter**.
-2. Pick a **template** and **duration**, type the **candidate name**, choose a **position** (searchable), and enter the **start date** (dashes are added automatically; the **end date** is calculated for you).
-3. Click **⚡ Generate PDF** (or **👁 Preview** first). The PDF opens automatically and a unique **Intern ID** is assigned.
+2. Pick a **document type** (Internship Offer, Internship Certificate, or Certificate of Completion) and **duration**, type the **candidate name**, choose a **position** (searchable), and enter the **start date** (dashes are added automatically; the **end date** is calculated for you).
+3. Click **⚡ Generate** (or **👁 Preview** first). The PDF opens automatically and the candidate's **Intern ID** is assigned — or **reused** if they already exist.
 
 ### 3) Generate in bulk
 1. Go to **⚡ Bulk Generator**.
-2. Either **📥 Import Excel / CSV** or use the **Add Candidate Manually** form to type entries one by one.
+2. **📥 Import** an Excel/CSV, use the **Add Candidate Manually** form, or click **👥 Load Existing** to pull every previously generated candidate from the database.
 3. Review the table — invalid rows are highlighted; double-click any cell to edit; use **Select All** + **Delete** to manage rows.
-4. Pick a template and click **⚡ Generate All** — watch live progress, then open the folder or export a report.
+4. Pick a **document type** and click **⚡ Generate All** — watch live progress, then open the folder or export a report.
 
 **Recognised spreadsheet columns** (case-insensitive, extras ignored):
 
@@ -230,7 +233,10 @@ Open **🏢 Company Settings** and enter your company name, contact details and 
 Candidate Name | Position | Issue Date | Start Date | End Date
 ```
 
-### 4) Verify a document
+### 4) Generate another document for someone
+On the **📁 Generated Letters** page, each entry has a small dropdown + **Create** button — choose any document type to generate it for that person, reusing their stored details and the same **Intern ID**.
+
+### 5) Verify a document
 Open **🔎 Intern Verification**, type an Intern ID (e.g. `SO260015`) and click **Verify** to see the candidate, role, dates, status and linked PDF — fully offline.
 
 ### ⌨️ Keyboard Shortcuts
@@ -245,21 +251,19 @@ Open **🔎 Intern Verification**, type an Intern ID (e.g. `SO260015`) and click
 
 ---
 
-## 🗂 Document Templates
+## 🗂 Document Types
 
-All templates inherit the same branding (header, watermark, signature, seal, footer, typography):
+The document dropdown is curated to the types used in practice — all sharing the
+same ScaleOn branding (header, watermark, signature, seal, footer, typography):
 
-- Internship Offer
-- Full-Time Offer
-- Appointment Letter
-- Internship Certificate
-- Completion Certificate
-- Experience Letter
-- Relieving Letter
-- Appreciation Certificate
-- NDA
+- **Internship Offer** — portrait offer letter with the approved body text.
+- **Internship Certificate** — portrait completion certificate.
+- **Certificate of Completion** — premium **A4 landscape** certificate with a decorative gold border, large candidate name, appreciation paragraph, optional grade/remarks and a certificate number.
 
-**Adding a template** is a one-class change in `pdf_generator.py`: subclass `BaseTemplate`, set a `title`, override `build_body()`, and register it in the `TEMPLATES` dict — it then appears automatically in the UI.
+**Adding a type** is a small change: portrait documents subclass `BaseTemplate`
+in `pdf_generator.py`; the landscape certificate lives in
+`certificate_generator.py`. The `doc_router.py` module maps a document type to
+the right renderer and file name, keeping the single and bulk flows in sync.
 
 ---
 
@@ -297,9 +301,11 @@ CertiFlow/
 ├── app.py              # entry point
 ├── ui.py               # main UI (pages + widgets)
 ├── bulk_ui.py          # bulk generator page
-├── pdf_generator.py    # ReportLab template framework
+├── pdf_generator.py    # ReportLab template framework (portrait documents)
+├── certificate_generator.py  # premium A4 landscape Certificate of Completion
+├── doc_router.py       # maps document type -> renderer + file name
 ├── bulk_generator.py   # import · validation · threaded generation
-├── database.py         # SQLite Intern ID store
+├── database.py         # SQLite Intern ID store (+ name lookup)
 ├── settings.py         # JSON persistence + asset auto-load
 ├── utils.py            # dates · filenames · validation · OS helpers
 ├── requirements.txt
@@ -333,6 +339,9 @@ Duplicate names never overwrite — they get `(1)`, `(2)`… suffixes.
 
 ## 🧭 Roadmap
 
+- [x] Certificate of Completion generation (single + bulk)
+- [x] Reuse one Intern ID per person across documents
+- [x] Generate another document from existing records
 - [ ] Email generated PDFs directly to candidates
 - [ ] WhatsApp sharing
 - [ ] QR-code verification printed on documents

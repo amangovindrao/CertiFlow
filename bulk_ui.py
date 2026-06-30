@@ -25,6 +25,7 @@ from typing import Dict, List, Optional
 import customtkinter as ctk
 
 import bulk_generator as bg
+import doc_router
 import utils
 from pdf_generator import TEMPLATE_LABELS
 from settings import OUTPUT_DIR
@@ -70,7 +71,7 @@ class BulkGeneratorPage(ctk.CTkFrame):
     def _build_toolbar(self) -> None:
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.grid(row=2, column=0, sticky="ew", padx=40, pady=(0, 8))
-        bar.grid_columnconfigure(6, weight=1)
+        bar.grid_columnconfigure(7, weight=1)
 
         def tbtn(text, cmd, col, primary=False):
             ctk.CTkButton(
@@ -81,41 +82,42 @@ class BulkGeneratorPage(ctk.CTkFrame):
                 text_color="#FFFFFF" if primary else ("#374151", "#D1D5DB"),
             ).grid(row=0, column=col, padx=(0, 6), sticky="w")
 
-        tbtn("📥  Import Excel / CSV", self._import, 0, primary=True)
-        tbtn("☑  Select All", self._select_all, 1)
-        tbtn("🗑  Delete", self._delete_selected, 2)
+        tbtn("📥  Import", self._import, 0, primary=True)
+        tbtn("👥  Load Existing", self._load_existing, 1)
+        tbtn("☑  Select All", self._select_all, 2)
+        tbtn("🗑  Delete", self._delete_selected, 3)
 
         # Template selector (which document to generate for the batch).
-        self.template_var = ctk.StringVar(value=TEMPLATE_LABELS[0])
+        self.template_var = ctk.StringVar(value=doc_router.DOC_TYPES[0])
         ctk.CTkOptionMenu(
-            bar, values=TEMPLATE_LABELS, variable=self.template_var,
-            height=38, width=180, corner_radius=CORNER, font=_font(12),
+            bar, values=doc_router.DOC_TYPES, variable=self.template_var,
+            height=38, width=170, corner_radius=CORNER, font=_font(12),
             fg_color=ACCENT, button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-        ).grid(row=0, column=3, padx=(0, 6))
+        ).grid(row=0, column=4, padx=(0, 6))
 
         # Filter
         self.filter_var = ctk.StringVar(value="All")
         ctk.CTkOptionMenu(
             bar, values=["All", "Valid", "Invalid"], variable=self.filter_var,
-            command=lambda *_: self._render_table(), height=38, width=110,
+            command=lambda *_: self._render_table(), height=38, width=100,
             corner_radius=CORNER, font=_font(12), fg_color=("#F3F4F6", "#222222"),
             button_color=ACCENT, button_hover_color=ACCENT_HOVER,
             text_color=("#374151", "#D1D5DB"),
-        ).grid(row=0, column=4, padx=(0, 6))
+        ).grid(row=0, column=5, padx=(0, 6))
 
         # Search
         self.search_var = ctk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._render_table())
-        ctk.CTkEntry(bar, textvariable=self.search_var, height=38, width=200,
+        ctk.CTkEntry(bar, textvariable=self.search_var, height=38, width=170,
                      corner_radius=CORNER, font=_font(12),
                      placeholder_text="🔍  Search…").grid(
-            row=0, column=5, padx=(0, 6))
+            row=0, column=6, padx=(0, 6))
 
         ctk.CTkButton(
             bar, text="⚡  Generate All", command=self._generate_all, height=38,
             corner_radius=CORNER, font=_font(13, "bold"), fg_color=ACCENT,
             hover_color=ACCENT_HOVER,
-        ).grid(row=0, column=7, sticky="e")
+        ).grid(row=0, column=8, sticky="e")
 
     def _build_quick_add(self) -> None:
         """Inline form to type a candidate and add it straight to the list."""
@@ -360,6 +362,44 @@ class BulkGeneratorPage(ctk.CTkFrame):
         children = self.tree.get_children()
         if children:
             self.tree.selection_set(children)
+
+    def _load_existing(self) -> None:
+        """Load all previously generated candidates from the database so a
+        different document can be bulk-generated for them."""
+        db = getattr(self.app, "db", None)
+        if db is None:
+            ModernDialog(self.app, "Unavailable",
+                         "The candidate database is not available.", icon="⚠")
+            return
+        records = db.search("")
+        if not records:
+            ModernDialog(self.app, "No Records",
+                         "No previously generated candidates were found yet.",
+                         icon="⚠")
+            return
+        # De-duplicate by candidate name (keep the most recent record).
+        seen = set()
+        rows: List[Dict[str, str]] = []
+        for rec in records:  # search() returns newest first
+            name = (rec.get("candidate_name") or "").strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "candidate_name": name,
+                "position": rec.get("position", ""),
+                "domain": rec.get("domain", ""),
+                "issue_date": rec.get("issue_date", ""),
+                "start_date": rec.get("start_date", ""),
+                "end_date": rec.get("end_date", ""),
+            })
+        self.rows = rows
+        self._recompute()
+        self._render_table()
+        ModernDialog(self.app, "Loaded Existing Candidates",
+                     f"Loaded {len(rows)} candidate(s). Pick a document type "
+                     f"and click Generate All.", icon="👥")
 
     def _delete_selected(self) -> None:
         selected = self.tree.selection()

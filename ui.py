@@ -32,6 +32,8 @@ except Exception:  # pragma: no cover - calendar is optional at runtime
 import utils
 from pdf_generator import PDFGenerator, TEMPLATE_LABELS
 from database import InternDatabase
+import doc_router
+from certificate_generator import CertificateStore
 from settings import (
     ASSETS_DIR,
     BASE_DIR,
@@ -273,6 +275,7 @@ class OfferLetterApp(ctk.CTk):
         self.app_settings = AppSettings()
         self.pdf = PDFGenerator(BASE_DIR)
         self.db = InternDatabase(COMPANY_DIR / "interns.db")
+        self.cert_store = CertificateStore(COMPANY_DIR / "interns.db")
         self._draft_job = None  # debounce handle for auto-save
 
         # -- window ------------------------------------------------------- #
@@ -372,6 +375,12 @@ class OfferLetterApp(ctk.CTk):
         from bulk_ui import BulkGeneratorPage
         return BulkGeneratorPage(self, self)
 
+    def _build_certificate_page(self) -> ctk.CTkFrame:
+        # (Retained for compatibility; Certificate of Completion is now a
+        # Document Template option on the New Letter page.)
+        from certificate_ui import CertificatePage
+        return CertificatePage(self, self)
+
     def show_page(self, key: str) -> None:
         for page in self.pages.values():
             page.grid_forget()
@@ -431,9 +440,9 @@ class OfferLetterApp(ctk.CTk):
         ctk.CTkLabel(top, text="Document Template", font=_font(11, "bold"),
                      text_color=("#374151", "#D1D5DB"), anchor="w").grid(
             row=0, column=0, sticky="ew", pady=(0, 2))
-        self.template_var = ctk.StringVar(value=TEMPLATE_LABELS[0])
+        self.template_var = ctk.StringVar(value=doc_router.DOC_TYPES[0])
         ctk.CTkOptionMenu(
-            top, values=TEMPLATE_LABELS, variable=self.template_var,
+            top, values=doc_router.DOC_TYPES, variable=self.template_var,
             height=40, corner_radius=CORNER, font=_font(12),
             fg_color=ACCENT, button_color=ACCENT, button_hover_color=ACCENT_HOVER,
         ).grid(row=1, column=0, sticky="ew", padx=(0, 8))
@@ -632,8 +641,31 @@ class OfferLetterApp(ctk.CTk):
         parsed = utils.parse_date(data.get("issue_date", ""))
         return parsed.year if parsed else datetime.now().year
 
+    def _resolve_intern_id(self, data: Dict[str, str], consume: bool) -> str:
+        """Reuse the same Intern ID for a known name, else allocate a new one.
+
+        ``consume=False`` (preview) peeks without allocating.
+        """
+        existing = self.db.get_by_name(data.get("candidate_name", ""))
+        if existing and existing.get("intern_id"):
+            return existing["intern_id"]
+        if consume:
+            return self.db.next_intern_id(self._issue_year(data))
+        return self.db.peek_next_intern_id(self._issue_year(data))
+
+    def _prepare_doc(self, data: Dict[str, str], consume: bool) -> None:
+        """Fill Intern ID, duration and (for certificates) the certificate no."""
+        data["intern_id"] = self._resolve_intern_id(data, consume)
+        if not data.get("duration"):
+            data["duration"] = utils.duration_between(
+                data.get("start_date", ""), data.get("end_date", ""))
+        if doc_router.is_landscape_cert(data.get("template", "")):
+            year = self._issue_year(data)
+            data["cert_no"] = (self.cert_store.next_cert_no(year) if consume
+                               else self.cert_store.peek_next_cert_no(year))
+
     def _record_intern(self, data: Dict[str, str], path: Path) -> None:
-        """Persist a generated-letter record to the local SQLite database."""
+        """Persist a generated-document record to the local SQLite database."""
         self.db.add_record({
             "intern_id": data.get("intern_id", ""),
             "candidate_name": data.get("candidate_name", ""),
@@ -646,18 +678,26 @@ class OfferLetterApp(ctk.CTk):
             "pdf_path": str(path),
             "status": "Generated",
         })
+        # Completion certificates also get a certificate record.
+        if doc_router.is_landscape_cert(data.get("template", "")):
+            self.cert_store.add_record({**data, "pdf_path": str(path),
+                                        "status": "Completed"})
+
+    def _render(self, path: Path, data: Dict[str, str]) -> None:
+        doc_router.render(path, self.company.data, data, data["template"],
+                          BASE_DIR, self.pdf)
 
     def _generate(self) -> None:
         data = self._collect()
         if not self._validate_or_warn(data):
             return
-        # Allocate a unique Intern ID and stamp it onto the letter.
-        data["intern_id"] = self.db.next_intern_id(self._issue_year(data))
+        self._prepare_doc(data, consume=True)
         folder = Path(self.app_settings.last_output_folder)
-        base = utils.build_filename(data["candidate_name"], "Offer_Letter")
+        base = utils.build_filename(
+            data["candidate_name"], doc_router.filename_suffix(data["template"]))
         path = utils.unique_path(folder, base)
         try:
-            self.pdf.generate(path, self.company.data, data, data["template"])
+            self._render(path, data)
         except Exception as exc:  # pragma: no cover - defensive
             ModernDialog(self, "Generation Failed", str(exc), icon="❌")
             return
@@ -673,12 +713,11 @@ class OfferLetterApp(ctk.CTk):
         data = self._collect()
         if not self._validate_or_warn(data):
             return
-        # Show the next ID on the preview without consuming it.
-        data["intern_id"] = self.db.peek_next_intern_id(self._issue_year(data))
+        self._prepare_doc(data, consume=False)
         tmp_dir = Path(tempfile.gettempdir())
         path = tmp_dir / f"preview_{utils.sanitize_filename(data['candidate_name'])}.pdf"
         try:
-            self.pdf.generate(path, self.company.data, data, data["template"])
+            self._render(path, data)
             utils.open_file(path)
         except Exception as exc:  # pragma: no cover
             ModernDialog(self, "Preview Failed", str(exc), icon="❌")
@@ -687,8 +726,9 @@ class OfferLetterApp(ctk.CTk):
         data = self._collect()
         if not self._validate_or_warn(data):
             return
-        data["intern_id"] = self.db.next_intern_id(self._issue_year(data))
-        base = utils.build_filename(data["candidate_name"], "Offer_Letter")
+        self._prepare_doc(data, consume=True)
+        base = utils.build_filename(
+            data["candidate_name"], doc_router.filename_suffix(data["template"]))
         dest = filedialog.asksaveasfilename(
             defaultextension=".pdf", initialfile=f"{base}.pdf",
             filetypes=[("PDF Document", "*.pdf")],
@@ -698,7 +738,7 @@ class OfferLetterApp(ctk.CTk):
             return
         dest_path = Path(dest)
         try:
-            self.pdf.generate(dest_path, self.company.data, data, data["template"])
+            self._render(dest_path, data)
         except Exception as exc:  # pragma: no cover
             ModernDialog(self, "Save Failed", str(exc), icon="❌")
             return
@@ -1037,7 +1077,7 @@ class OfferLetterApp(ctk.CTk):
             "NDA": "Non-disclosure agreement for confidentiality.",
         }
 
-        for i, label in enumerate(TEMPLATE_LABELS):
+        for i, label in enumerate(doc_router.DOC_TYPES):
             r, col = divmod(i, 3)
             card = ctk.CTkFrame(grid, corner_radius=16,
                                 fg_color=("#FFFFFF", "#161616"),
@@ -1151,8 +1191,7 @@ class OfferLetterApp(ctk.CTk):
         ctk.CTkLabel(card, text="📄", font=_font(22)).grid(
             row=0, column=0, rowspan=2, padx=(16, 8), pady=10)
 
-        # Candidate name is the part before the template suffix.
-        candidate = path.stem.split("_Offer_Letter")[0].replace("_", " ")
+        candidate = self._candidate_from_filename(path)
         ctk.CTkLabel(card, text=path.name, font=_font(13, "bold"),
                      anchor="w").grid(row=0, column=1, sticky="w", pady=(10, 0))
         modified = datetime.fromtimestamp(path.stat().st_mtime).strftime(
@@ -1161,12 +1200,15 @@ class OfferLetterApp(ctk.CTk):
                      font=_font(11), text_color=("#6B7280", "#9CA3AF"),
                      anchor="w").grid(row=1, column=1, sticky="w", pady=(0, 10))
 
-        btns = ctk.CTkFrame(card, fg_color="transparent")
-        btns.grid(row=0, column=2, rowspan=2, padx=12)
+        right = ctk.CTkFrame(card, fg_color="transparent")
+        right.grid(row=0, column=2, rowspan=2, padx=12, pady=8)
+
+        btns = ctk.CTkFrame(right, fg_color="transparent")
+        btns.pack(anchor="e")
 
         def mk(text, cmd, danger=False):
             ctk.CTkButton(
-                btns, text=text, command=cmd, width=70, height=34,
+                btns, text=text, command=cmd, width=70, height=32,
                 corner_radius=8, font=_font(11, "bold"),
                 fg_color="#EF4444" if danger else ("#F3F4F6", "#222222"),
                 hover_color="#DC2626" if danger else ("#E5E7EB", "#2E2E2E"),
@@ -1176,6 +1218,75 @@ class OfferLetterApp(ctk.CTk):
         mk("Open", lambda: utils.open_file(path))
         mk("Reveal", lambda: utils.reveal_in_folder(path))
         mk("Delete", lambda: self._delete_pdf(path), danger=True)
+
+        # "Generate another" - reuse this candidate's stored data.
+        another = ctk.CTkFrame(right, fg_color="transparent")
+        another.pack(anchor="e", pady=(6, 0))
+        ctk.CTkLabel(another, text="Generate another:", font=_font(10),
+                     text_color=("#6B7280", "#9CA3AF")).pack(side="left",
+                                                             padx=(0, 6))
+        var = ctk.StringVar(value=doc_router.DOC_TYPES[0])
+        ctk.CTkOptionMenu(another, values=doc_router.DOC_TYPES, variable=var,
+                          width=190, height=30, corner_radius=8, font=_font(11),
+                          fg_color=ACCENT, button_color=ACCENT,
+                          button_hover_color=ACCENT_HOVER).pack(side="left")
+        ctk.CTkButton(
+            another, text="Create", width=66, height=30, corner_radius=8,
+            font=_font(11, "bold"), fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            command=lambda c=candidate, v=var: self._generate_another(c, v.get()),
+        ).pack(side="left", padx=(6, 0))
+
+    @staticmethod
+    def _candidate_from_filename(path: Path) -> str:
+        """Best-effort candidate name from a generated file name."""
+        stem = path.stem
+        for suffix in ("_Offer_Letter", "_Certificate_of_Completion",
+                       "_Internship_Certificate"):
+            if suffix in stem:
+                stem = stem.split(suffix)[0]
+                break
+        # Drop a trailing duplicate marker like (1).
+        import re
+        stem = re.sub(r"\(\d+\)$", "", stem)
+        return stem.replace("_", " ").strip()
+
+    def _generate_another(self, candidate: str, template: str) -> None:
+        """Generate a different document for an existing candidate, reusing
+        their stored data and Intern ID."""
+        rec = self.db.get_by_name(candidate)
+        if not rec:
+            ModernDialog(self, "No Stored Data",
+                         f"No saved record found for '{candidate}' to reuse. "
+                         f"Generate their first document from the New Letter "
+                         f"page.", icon="⚠")
+            return
+        data = {
+            "candidate_name": rec.get("candidate_name", ""),
+            "position": rec.get("position", ""),
+            "department": rec.get("domain", ""),
+            "college": "", "email": "",
+            "issue_date": utils.format_date(datetime.now()),
+            "start_date": rec.get("start_date", ""),
+            "end_date": rec.get("end_date", ""),
+            "duration": rec.get("duration", ""),
+            "template": template,
+        }
+        self._prepare_doc(data, consume=True)
+        base = utils.build_filename(data["candidate_name"],
+                                    doc_router.filename_suffix(template))
+        path = utils.unique_path(OUTPUT_DIR, base)
+        try:
+            self._render(path, data)
+        except Exception as exc:
+            ModernDialog(self, "Generation Failed", str(exc), icon="❌")
+            return
+        self._record_intern(data, path)
+        self._refresh_generated()
+        ModernDialog(
+            self, f"{template} Generated",
+            f"Saved as {path.name}\nIntern ID: {data['intern_id']}", icon="✅",
+            actions=[("Open PDF", lambda: utils.open_file(path), True),
+                     ("Open Folder", lambda: utils.reveal_in_folder(path), False)])
 
     def _delete_pdf(self, path: Path) -> None:
         def do_delete():
@@ -1231,7 +1342,7 @@ class OfferLetterApp(ctk.CTk):
         self.bind("<Control-p>", lambda e: self._preview())
         self.bind("<Control-s>", lambda e: self._save_as())
         self.bind("<Control-r>", lambda e: self._reset_form())
-        pages = ["new", "bulk", "verify", "company", "templates", "generated",
-                 "about"]
+        pages = ["new", "bulk", "verify", "company",
+                 "templates", "generated", "about"]
         for i, key in enumerate(pages, start=1):
             self.bind(f"<Control-Key-{i}>", lambda e, k=key: self.show_page(k))

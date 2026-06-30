@@ -136,6 +136,20 @@ class InternDatabase:
                 (intern_id.strip(),)).fetchone()
         return dict(row) if row else None
 
+    def get_by_name(self, name: str) -> Optional[Dict[str, str]]:
+        """Return the most recent record for a candidate name (case-insensitive).
+
+        Used to reuse the same Intern ID when the same person receives another
+        document (e.g. an offer letter then a completion certificate).
+        """
+        if not name or not name.strip():
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM interns WHERE LOWER(candidate_name) = LOWER(?) "
+                "ORDER BY created_at DESC LIMIT 1", (name.strip(),)).fetchone()
+        return dict(row) if row else None
+
     def search(self, term: str = "") -> List[Dict[str, str]]:
         """Return records matching ``term`` in id/name/position (newest first)."""
         like = f"%{term.strip()}%"
