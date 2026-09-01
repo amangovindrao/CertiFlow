@@ -100,6 +100,73 @@ def _register_arial() -> None:
             break
 
 
+# --------------------------------------------------------------------------- #
+# Premium certificate typography
+# --------------------------------------------------------------------------- #
+# Display face for certificate headings and an elegant serif for the recipient
+# name. Both resolve to real fonts already on the machine - bundled TTFs in
+# assets/fonts win, then common Windows faces, then the base-14 fallbacks.
+# Nothing is ever downloaded, and the stack stays within 2-3 families.
+FONT_DISPLAY = "Helvetica-Bold"          # headings  (Montserrat / Poppins)
+FONT_DISPLAY_REG = "Helvetica"           # heading regular weight
+FONT_SERIF_NAME = "Times-Bold"           # intern name (Playfair / Cormorant)
+
+_WIN_FONTS = Path(r"C:\Windows\Fonts")
+
+
+def _try_register(name: str, candidates: List[Path]) -> str | None:
+    """Register the first existing font file under ``name``; return the name."""
+    for path in candidates:
+        if path and path.exists():
+            try:
+                pdfmetrics.registerFont(TTFont(name, str(path)))
+                return name
+            except Exception:
+                continue
+    return None
+
+
+def register_display_fonts(fonts_dir: Path) -> None:
+    """Register the certificate display + serif faces (idempotent, safe)."""
+    global FONT_DISPLAY, FONT_DISPLAY_REG, FONT_SERIF_NAME
+
+    # Heading: Montserrat / Poppins, else Segoe UI Semibold, else brand bold.
+    display = _try_register("Display-Bold", [
+        fonts_dir / "Montserrat-Bold.ttf",
+        fonts_dir / "Poppins-Bold.ttf",
+        fonts_dir / "Poppins-SemiBold.ttf",
+        _WIN_FONTS / "Poppins-SemiBold.ttf",
+        _WIN_FONTS / "Poppins-Medium.ttf",
+        _WIN_FONTS / "seguisb.ttf",          # Segoe UI Semibold
+        _WIN_FONTS / "segoeuib.ttf",         # Segoe UI Bold
+    ])
+    if display:
+        FONT_DISPLAY = display
+    else:
+        FONT_DISPLAY = FONT_BOLD
+
+    display_reg = _try_register("Display", [
+        fonts_dir / "Montserrat-Regular.ttf",
+        fonts_dir / "Poppins-Regular.ttf",
+        _WIN_FONTS / "Poppins-Regular.ttf",
+        _WIN_FONTS / "segoeui.ttf",
+    ])
+    FONT_DISPLAY_REG = display_reg or FONT_REGULAR
+
+    # Intern name: Playfair Display / Cormorant Garamond, else Georgia or
+    # Cambria (both elegant, widely installed), else Times-Bold.
+    serif = _try_register("Serif-Display", [
+        fonts_dir / "PlayfairDisplay-Bold.ttf",
+        fonts_dir / "PlayfairDisplay-SemiBold.ttf",
+        fonts_dir / "CormorantGaramond-Bold.ttf",
+        fonts_dir / "Cormorant-Bold.ttf",
+        _WIN_FONTS / "georgiab.ttf",
+        _WIN_FONTS / "cambriab.ttf",
+        _WIN_FONTS / "constanb.ttf",
+    ])
+    FONT_SERIF_NAME = serif or SERIF_BOLD
+
+
 def register_fonts(fonts_dir: Path) -> None:
     """Register bundled TTF fonts when available so they embed in the PDF."""
     global FONT_REGULAR, FONT_BOLD, FONT_ITALIC, FONT_LIGHT
@@ -168,6 +235,12 @@ def _resolve(base_dir: Path, rel: str) -> Path | None:
     return p if p.exists() else None
 
 
+# Processed watermarks are cached: building one walks every pixel, which is
+# far too slow to repeat on each render (the live certificate preview would
+# stutter). Keyed by file identity + appearance so edits still take effect.
+_WATERMARK_CACHE: Dict[tuple, "ImageReader | None"] = {}
+
+
 def _watermark_image(path: Path, opacity: float = 0.08,
                      tint=(95, 95, 95)) -> ImageReader | None:
     """Turn the logo into a faint, transparent-background watermark.
@@ -178,6 +251,14 @@ def _watermark_image(path: Path, opacity: float = 0.08,
     """
     if Image is None:
         return None
+    try:
+        stat = Path(path).stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size, round(opacity, 4),
+               tuple(tint))
+    except OSError:
+        key = None
+    if key is not None and key in _WATERMARK_CACHE:
+        return _WATERMARK_CACHE[key]
     try:
         img = Image.open(path).convert("RGBA")
         alpha_val = int(255 * opacity)
@@ -191,7 +272,10 @@ def _watermark_image(path: Path, opacity: float = 0.08,
         buf = BytesIO()
         img.save(buf, format="PNG")
         buf.seek(0)
-        return ImageReader(buf)
+        reader = ImageReader(buf)
+        if key is not None:
+            _WATERMARK_CACHE[key] = reader
+        return reader
     except Exception:
         return None
 
@@ -293,9 +377,23 @@ class BaseTemplate:
             c.setFillColor(BLACK)
             c.setFont(self.bold, 12)
             c.drawRightString(PAGE_W - MARGIN, right_y - 33, intern_id)
+            right_y = right_y - 33
 
-        # Thin light-grey divider beneath the header.
-        line_y = logo_bottom - 24
+        # Certificate number for certificate documents, so the printed PDF
+        # carries the ID used by the offline verification panel.
+        cert_no = str(self.data.get("cert_no", "")).strip()
+        if cert_no:
+            c.setFillColor(DARK_GRAY)
+            c.setFont(self.regular, 8.5)
+            c.drawRightString(PAGE_W - MARGIN, right_y - 18, "CERTIFICATE NO")
+            c.setFillColor(BLACK)
+            c.setFont(self.bold, 11)
+            c.drawRightString(PAGE_W - MARGIN, right_y - 32, cert_no)
+            right_y = right_y - 32
+
+        # Thin light-grey divider beneath the header. It always clears both the
+        # logo and the (variable height) right-hand ID block.
+        line_y = min(logo_bottom - 24, right_y - 14)
         c.setStrokeColor(HAIRLINE)
         c.setLineWidth(1)
         c.line(MARGIN, line_y, PAGE_W - MARGIN, line_y)
@@ -623,184 +721,11 @@ class InternshipOfferTemplate(BaseTemplate):
         ]
 
 
-class JobOfferTemplate(BaseTemplate):
-    title = "Full-Time Offer Letter"
-
-    def build_body(self) -> List[str]:
-        dept = f" in the <b>{self.department}</b> department" if self.department else ""
-        return [
-            (f"We are pleased to offer you the full-time position of "
-             f"<b>{self.position}</b>{dept} at <b>{self.company_name}</b>. "
-             f"Your skills, experience and professional outlook stood out "
-             f"during our evaluation, and we are confident you will be a "
-             f"valuable addition to our team."),
-            (f"Your employment will be effective from <b>{self.start}</b>. The "
-             f"complete details of your compensation, benefits and "
-             f"responsibilities will be provided in your formal employment "
-             f"agreement."),
-            ("This offer is contingent upon successful background verification "
-             "and submission of the required documentation. You will be "
-             "governed by the policies and code of conduct of the company."),
-            ("We are excited about the contribution you will make and look "
-             "forward to a long and rewarding association."),
-            ("Please sign and return a copy of this letter as confirmation of "
-             "your acceptance."),
-            (f"We warmly welcome you to the <b>{self.company_name}</b> family."),
-        ]
 
 
-class AppointmentLetterTemplate(BaseTemplate):
-    title = "Appointment Letter"
-
-    def build_body(self) -> List[str]:
-        dept = f" in the <b>{self.department}</b> department" if self.department else ""
-        return [
-            (f"With reference to your application and subsequent interview, we "
-             f"are pleased to appoint you as <b>{self.position}</b>{dept} at "
-             f"<b>{self.company_name}</b>, effective <b>{self.start}</b>."),
-            ("You will be governed by the rules, regulations and policies of "
-             "the company as amended from time to time. A detailed description "
-             "of your role, responsibilities and reporting structure will be "
-             "shared separately."),
-            ("You are expected to maintain the highest standards of "
-             "professionalism, integrity and confidentiality throughout your "
-             "tenure with the organization."),
-            ("Please sign and return the duplicate copy of this letter as "
-             "confirmation of your acceptance of this appointment."),
-            (f"We warmly welcome you to the <b>{self.company_name}</b> family."),
-        ]
 
 
-class InternshipCertificateTemplate(BaseTemplate):
-    title = "Internship Completion Certificate"
 
-    @property
-    def greeting(self) -> str:
-        return ""
-
-    def build_body(self) -> List[str]:
-        return [
-            (f"This is to certify that <b>{self.name}</b> has successfully "
-             f"completed an internship as a <b>{self.position}</b> at "
-             f"<b>{self.company_name}</b> from <b>{self.start}</b> to "
-             f"<b>{self.end}</b>, for a total duration of <b>{self.duration}</b>."),
-            (f"During this period, {self.name} was actively involved in live "
-             f"projects and demonstrated excellent learning ability, "
-             f"commitment, discipline and a collaborative attitude."),
-            ("Their conduct and performance throughout the internship were "
-             "found to be exemplary and in line with the values of the "
-             "organization."),
-            ("We appreciate the contribution made during the internship and "
-             "wish them continued success in their professional career."),
-        ]
-
-
-class CompletionCertificateTemplate(BaseTemplate):
-    title = "Certificate of Completion"
-
-    @property
-    def greeting(self) -> str:
-        return ""
-
-    def build_body(self) -> List[str]:
-        program = self.data.get("course") or self.position
-        return [
-            (f"This certificate is proudly presented to <b>{self.name}</b> in "
-             f"recognition of the successful completion of the "
-             f"<b>{program}</b> program at <b>{self.company_name}</b>."),
-            (f"The program was undertaken from <b>{self.start}</b> to "
-             f"<b>{self.end}</b>, during which {self.name} displayed remarkable "
-             f"dedication, skill and professionalism."),
-            ("This achievement reflects a high standard of commitment and we "
-             "extend our heartfelt congratulations on this accomplishment."),
-        ]
-
-
-class ExperienceLetterTemplate(BaseTemplate):
-    title = "Experience Letter"
-
-    @property
-    def greeting(self) -> str:
-        return "<b>To Whom It May Concern,</b>"
-
-    def build_body(self) -> List[str]:
-        return [
-            (f"This is to certify that <b>{self.name}</b> was associated with "
-             f"<b>{self.company_name}</b> as a <b>{self.position}</b> from "
-             f"<b>{self.start}</b> to <b>{self.end}</b>."),
-            (f"During the tenure with us, {self.name} demonstrated strong "
-             f"professional competence, dedication and a collaborative "
-             f"attitude. Their conduct and overall performance were found to "
-             f"be satisfactory and commendable."),
-            (f"We thank {self.name} for the valuable contribution to the "
-             f"organization and wish them the very best for all future "
-             f"endeavours."),
-        ]
-
-
-class RelievingLetterTemplate(BaseTemplate):
-    title = "Relieving Letter"
-
-    def build_body(self) -> List[str]:
-        return [
-            (f"This is to formally confirm that you have been relieved from "
-             f"your duties as <b>{self.position}</b> at <b>{self.company_name}"
-             f"</b> with effect from <b>{self.end}</b>."),
-            (f"You served the organization from <b>{self.start}</b> to "
-             f"<b>{self.end}</b>. We confirm that all your dues have been "
-             f"settled and there are no pending obligations on either side."),
-            ("Your contribution during your tenure is sincerely appreciated."),
-            ("We wish you success and fulfilment in your future endeavours."),
-        ]
-
-
-class AppreciationCertificateTemplate(BaseTemplate):
-    title = "Certificate of Appreciation"
-
-    @property
-    def greeting(self) -> str:
-        return ""
-
-    def build_body(self) -> List[str]:
-        return [
-            (f"This certificate of appreciation is proudly awarded to "
-             f"<b>{self.name}</b> for outstanding performance and valuable "
-             f"contribution as a <b>{self.position}</b> at "
-             f"<b>{self.company_name}</b>."),
-            (f"Your dedication, initiative and professionalism between "
-             f"<b>{self.start}</b> and <b>{self.end}</b> have made a "
-             f"meaningful difference to our team and our clients."),
-            ("We thank you for your commitment and wish you continued success "
-             "in all your future endeavours."),
-        ]
-
-
-class NDATemplate(BaseTemplate):
-    title = "Non-Disclosure Agreement"
-
-    @property
-    def greeting(self) -> str:
-        return ""
-
-    def build_body(self) -> List[str]:
-        issue = format_long_date(self.data.get("issue_date", ""))
-        return [
-            (f"This Non-Disclosure Agreement (\"Agreement\") is entered into on "
-             f"<b>{issue}</b> between <b>{self.company_name}</b> (the "
-             f"\"Disclosing Party\") and <b>{self.name}</b> (the \"Receiving "
-             f"Party\")."),
-            ("<b>1. Confidential Information.</b> The Receiving Party agrees to "
-             "treat all proprietary, technical and business information "
-             "disclosed during the engagement as strictly confidential."),
-            ("<b>2. Obligations.</b> The Receiving Party shall not disclose, "
-             "copy or use the Confidential Information for any purpose other "
-             "than that for which it was provided."),
-            ("<b>3. Term.</b> The obligations under this Agreement remain in "
-             "effect during the engagement and for such period thereafter as "
-             "is necessary to protect the Disclosing Party's interests."),
-            ("By signing below, the Receiving Party acknowledges and agrees to "
-             "the terms set forth in this Agreement."),
-        ]
 
 
 # --------------------------------------------------------------------------- #
@@ -808,17 +733,7 @@ class NDATemplate(BaseTemplate):
 # --------------------------------------------------------------------------- #
 TEMPLATES: Dict[str, Type[BaseTemplate]] = {
     "Internship Offer": InternshipOfferTemplate,
-    "Full-Time Offer": JobOfferTemplate,
-    "Appointment Letter": AppointmentLetterTemplate,
-    "Internship Certificate": InternshipCertificateTemplate,
-    "Completion Certificate": CompletionCertificateTemplate,
-    "Experience Letter": ExperienceLetterTemplate,
-    "Relieving Letter": RelievingLetterTemplate,
-    "Appreciation Certificate": AppreciationCertificateTemplate,
-    "NDA": NDATemplate,
 }
-
-TEMPLATE_LABELS: List[str] = list(TEMPLATES.keys())
 
 
 class PDFGenerator:

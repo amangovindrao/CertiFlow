@@ -29,13 +29,14 @@ try:
 except Exception:  # pragma: no cover - calendar is optional at runtime
     Calendar = None  # type: ignore
 
+import settings
 import utils
-from pdf_generator import PDFGenerator, TEMPLATE_LABELS
+from pdf_generator import PDFGenerator
 from database import InternDatabase
 import doc_router
 from certificate_generator import CertificateStore
+import backup
 from settings import (
-    ASSETS_DIR,
     BASE_DIR,
     COMPANY_DIR,
     OUTPUT_DIR,
@@ -43,6 +44,7 @@ from settings import (
     CompanyProfile,
     asset_dir,
     autoload_assets,
+    resolve_path,
 )
 
 # --------------------------------------------------------------------------- #
@@ -57,6 +59,47 @@ PAD = 16
 
 def _font(size: int = 13, weight: str = "normal") -> ctk.CTkFont:
     return ctk.CTkFont(family=FONT_FAMILY, size=size, weight=weight)
+
+
+# --------------------------------------------------------------------------- #
+# Clipboard helpers (Intern IDs / certificate numbers are copied constantly)
+# --------------------------------------------------------------------------- #
+def copy_to_clipboard(widget, text: str) -> bool:
+    """Put ``text`` on the system clipboard. Returns True on success."""
+    value = str(text or "").strip()
+    if not value:
+        return False
+    try:
+        widget.clipboard_clear()
+        widget.clipboard_append(value)
+        widget.update_idletasks()      # keeps the clipboard after we exit
+        return True
+    except Exception:
+        return False
+
+
+def copy_button(master, text, width: int = 30, height: int = 26,
+                tooltip: str = "Copy"):
+    """A small button that copies ``text`` and briefly confirms.
+
+    ``text`` may be a string or a zero-argument callable, so the value can be
+    resolved at click time.
+    """
+    button = ctk.CTkButton(
+        master, text="\U0001F4CB", width=width, height=height,
+        corner_radius=6, font=_font(11),
+        fg_color=("#F3F4F6", "#2A2A2A"), hover_color=("#E5E7EB", "#333333"),
+        text_color=("#374151", "#D1D5DB"))
+
+    def do_copy():
+        value = text() if callable(text) else text
+        if copy_to_clipboard(button, value):
+            button.configure(text="\u2713", text_color="#16A34A")
+            button.after(1000, lambda: button.configure(
+                text="\U0001F4CB", text_color=("#374151", "#D1D5DB")))
+
+    button.configure(command=do_copy)
+    return button
 
 
 # --------------------------------------------------------------------------- #
@@ -257,12 +300,14 @@ class OfferLetterApp(ctk.CTk):
     """Top level window orchestrating navigation, pages and shared state."""
 
     NAV_ITEMS = [
-        ("📝  New Letter", "new"),
+        ("📄  Create Document", "create"),
+        ("🎨  Template Designer", "designer"),
+        ("👥  Interns", "interns"),
         ("⚡  Bulk Generator", "bulk"),
-        ("🔎  Intern Verification", "verify"),
+        ("🔎  Verification", "verify"),
+        ("📁  Generated Files", "generated"),
+        ("💾  Backup & Restore", "backup"),
         ("🏢  Company Settings", "company"),
-        ("🗂  Templates", "templates"),
-        ("📁  Generated Letters", "generated"),
         ("ℹ  About", "about"),
     ]
 
@@ -274,14 +319,16 @@ class OfferLetterApp(ctk.CTk):
         autoload_assets(self.company)  # auto-load logo/signature/watermark
         self.app_settings = AppSettings()
         self.pdf = PDFGenerator(BASE_DIR)
-        self.db = InternDatabase(COMPANY_DIR / "interns.db")
-        self.cert_store = CertificateStore(COMPANY_DIR / "interns.db")
-        self._draft_job = None  # debounce handle for auto-save
+        self.db_path = COMPANY_DIR / "interns.db"
+        # A snapshot per launch, before anything can be changed.
+        backup.create_backup(self.db_path, "startup")
+        self.db = InternDatabase(self.db_path)
+        self.cert_store = CertificateStore(self.db_path)
 
         # -- window ------------------------------------------------------- #
         ctk.set_appearance_mode(self.app_settings.theme.lower())
         ctk.set_default_color_theme("blue")
-        self.title("Offer Letter Generator")
+        self.title("CertiFlow")
         self.geometry("1180x760")
         self.minsize(980, 640)
         self.configure(fg_color=("#F7F8FA", "#0F0F0F"))
@@ -297,7 +344,7 @@ class OfferLetterApp(ctk.CTk):
         self._bind_shortcuts()
 
         # First-run: nudge the user to fill company settings.
-        start = "new" if self.company.is_configured() else "company"
+        start = "create" if self.company.is_configured() else "company"
         self.show_page(start)
         if not self.company.is_configured():
             self.after(400, lambda: ModernDialog(
@@ -318,11 +365,12 @@ class OfferLetterApp(ctk.CTk):
         bar.grid_rowconfigure(99, weight=1)
 
         ctk.CTkLabel(
-            bar, text="Offer Letter", font=_font(20, "bold"),
+            bar, text="CertiFlow", font=_font(22, "bold"),
             text_color=ACCENT,
         ).grid(row=0, column=0, sticky="w", padx=24, pady=(26, 0))
         ctk.CTkLabel(
-            bar, text="Generator", font=_font(20, "bold"),
+            bar, text=self.company.get("company_name", "") or "Documents",
+            font=_font(12), text_color=("#6B7280", "#9CA3AF"),
         ).grid(row=1, column=0, sticky="w", padx=24, pady=(0, 18))
 
         ctk.CTkFrame(bar, height=1, fg_color=("#E5E7EB", "#2A2A2A")).grid(
@@ -362,12 +410,14 @@ class OfferLetterApp(ctk.CTk):
     # Page management
     # ------------------------------------------------------------------ #
     def _build_pages(self) -> None:
-        self.pages["new"] = self._build_new_letter_page()
+        self.pages["create"] = self._build_create_page()
+        self.pages["designer"] = self._build_designer_page()
         self.pages["bulk"] = self._build_bulk_page()
+        self.pages["interns"] = self._build_interns_page()
         self.pages["verify"] = self._build_verify_page()
         self.pages["company"] = self._build_company_page()
-        self.pages["templates"] = self._build_templates_page()
         self.pages["generated"] = self._build_generated_page()
+        self.pages["backup"] = self._build_backup_page()
         self.pages["about"] = self._build_about_page()
 
     def _build_bulk_page(self) -> ctk.CTkFrame:
@@ -375,11 +425,33 @@ class OfferLetterApp(ctk.CTk):
         from bulk_ui import BulkGeneratorPage
         return BulkGeneratorPage(self, self)
 
-    def _build_certificate_page(self) -> ctk.CTkFrame:
-        # (Retained for compatibility; Certificate of Completion is now a
-        # Document Template option on the New Letter page.)
-        from certificate_ui import CertificatePage
-        return CertificatePage(self, self)
+    def _build_create_page(self) -> ctk.CTkFrame:
+        # Lazy import: the page imports shared widgets from this module.
+        from document_page import CreateDocumentPage
+        return CreateDocumentPage(self, self)
+
+    def _build_interns_page(self) -> ctk.CTkFrame:
+        from intern_directory import InternDirectoryPage
+        return InternDirectoryPage(self, self)
+
+    def _build_designer_page(self) -> ctk.CTkFrame:
+        from designer_page import DesignerPage
+        return DesignerPage(self, self)
+
+    def _build_backup_page(self) -> ctk.CTkFrame:
+        from backup_page import BackupPage
+        return BackupPage(self, self)
+
+    def refresh_document_types(self) -> None:
+        """Tell the generating pages that the custom template list changed."""
+        for key in ("create", "bulk"):
+            page = self.pages.get(key)
+            refresh = getattr(page, "refresh_types", None)
+            if refresh is not None:
+                try:
+                    refresh()
+                except Exception:
+                    pass
 
     def show_page(self, key: str) -> None:
         for page in self.pages.values():
@@ -397,6 +469,10 @@ class OfferLetterApp(ctk.CTk):
 
         if key == "generated":
             self._refresh_generated()
+        elif key == "interns":
+            # Certificates may have been issued from another page since the
+            # directory was last shown.
+            self.pages["interns"].refresh()
 
     # ------------------------------------------------------------------ #
     # Card helper
@@ -414,353 +490,6 @@ class OfferLetterApp(ctk.CTk):
                 row=1, column=0, sticky="w", padx=40, pady=(2, 10))
         return page
 
-
-    # ================================================================== #
-    # PAGE: New Letter
-    # ================================================================== #
-    def _build_new_letter_page(self) -> ctk.CTkFrame:
-        page = self._page_shell(
-            "Create a New Letter",
-            "Fill in the candidate details and generate a polished document.")
-
-        card = ctk.CTkFrame(page, corner_radius=18,
-                            fg_color=("#FFFFFF", "#161616"),
-                            border_width=1, border_color=("#ECECEC", "#242424"))
-        card.grid(row=2, column=0, sticky="ew", padx=40, pady=16)
-        card.grid_columnconfigure(0, weight=1)
-        card.grid_columnconfigure(1, weight=1)
-
-        self.form: Dict[str, object] = {}
-
-        # Template + duration row sits at the top.
-        top = ctk.CTkFrame(card, fg_color="transparent")
-        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=PAD, pady=(PAD, 0))
-        top.grid_columnconfigure((0, 1), weight=1)
-
-        ctk.CTkLabel(top, text="Document Template", font=_font(11, "bold"),
-                     text_color=("#374151", "#D1D5DB"), anchor="w").grid(
-            row=0, column=0, sticky="ew", pady=(0, 2))
-        self.template_var = ctk.StringVar(value=doc_router.DOC_TYPES[0])
-        ctk.CTkOptionMenu(
-            top, values=doc_router.DOC_TYPES, variable=self.template_var,
-            height=40, corner_radius=CORNER, font=_font(12),
-            fg_color=ACCENT, button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-        ).grid(row=1, column=0, sticky="ew", padx=(0, 8))
-
-        ctk.CTkLabel(top, text="Duration", font=_font(11, "bold"),
-                     text_color=("#374151", "#D1D5DB"), anchor="w").grid(
-            row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 2))
-        self.duration_var = ctk.StringVar(value="1 Month")
-        ctk.CTkOptionMenu(
-            top, values=list(utils.DURATION_OPTIONS.keys()),
-            variable=self.duration_var, command=lambda *_: self._auto_end_date(),
-            height=40, corner_radius=CORNER, font=_font(12),
-            fg_color=ACCENT, button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-        ).grid(row=1, column=1, sticky="ew", padx=(8, 0))
-
-        # Build a two-column grid of fields.
-        left = ctk.CTkFrame(card, fg_color="transparent")
-        left.grid(row=1, column=0, sticky="nsew")
-        left.grid_columnconfigure(0, weight=1)
-        right = ctk.CTkFrame(card, fg_color="transparent")
-        right.grid(row=1, column=1, sticky="nsew")
-        right.grid_columnconfigure(0, weight=1)
-
-        def entry(master):
-            e = ctk.CTkEntry(master, height=40, corner_radius=CORNER, font=_font(12))
-            e.bind("<KeyRelease>", lambda *_: self._schedule_draft_save())
-            return e
-
-        # Left column
-        self.form["candidate_name"] = labeled(left, "Candidate Name", entry, 0, True)
-        self.form["position"] = labeled(
-            left, "Position", lambda m: SearchableCombo(
-                m, utils.POSITION_OPTIONS, height=40, corner_radius=CORNER,
-                font=_font(12), button_color=ACCENT, button_hover_color=ACCENT_HOVER),
-            2, True)
-        self.form["college"] = labeled(left, "College (optional)", entry, 4)
-        self.form["email"] = labeled(left, "Email (optional)", entry, 6)
-
-        # Right column
-        self.form["issue_date"] = labeled(
-            right, "Issue Date", lambda m: DatePicker(m, self._schedule_draft_save),
-            0, True)
-        self.form["start_date"] = labeled(
-            right, "Internship Start Date",
-            lambda m: DatePicker(m, self._on_start_change), 2, True)
-        self.form["end_date"] = labeled(
-            right, "Internship End Date",
-            lambda m: DatePicker(m, self._schedule_draft_save), 4, True)
-
-        # Chain date fields so completing one jumps to the next.
-        self.form["issue_date"].next_widget = self.form["start_date"]
-        self.form["start_date"].next_widget = self.form["end_date"]
-
-        # Default issue date = today.
-        self.form["issue_date"].set(utils.format_date(datetime.now()))
-
-        # Action buttons
-        actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.grid(row=2, column=0, columnspan=2, sticky="ew",
-                     padx=PAD, pady=(10, PAD))
-        for i in range(5):
-            actions.grid_columnconfigure(i, weight=1)
-
-        self._action_btn(actions, "⚡  Generate PDF", self._generate, 0, primary=True)
-        self._action_btn(actions, "👁  Preview", self._preview, 1)
-        self._action_btn(actions, "💾  Save As", self._save_as, 2)
-        self._action_btn(actions, "🗐  Duplicate", self._duplicate_last, 3)
-        self._action_btn(actions, "↺  Reset", self._reset_form, 4)
-
-        # Recent candidates strip
-        self.recent_frame = ctk.CTkFrame(page, fg_color="transparent")
-        self.recent_frame.grid(row=3, column=0, sticky="ew", padx=40, pady=(0, 30))
-        self._refresh_recent()
-
-        # Restore any auto-saved draft.
-        self.after(200, self._restore_draft)
-        return page
-
-    def _action_btn(self, master, text: str, cmd: Callable, col: int,
-                    primary: bool = False) -> None:
-        ctk.CTkButton(
-            master, text=text, command=cmd, height=46, corner_radius=CORNER,
-            font=_font(13, "bold"),
-            fg_color=ACCENT if primary else ("#F3F4F6", "#222222"),
-            hover_color=ACCENT_HOVER if primary else ("#E5E7EB", "#2E2E2E"),
-            text_color="#FFFFFF" if primary else ("#374151", "#D1D5DB"),
-        ).grid(row=0, column=col, sticky="ew", padx=5)
-
-    # -- form behaviour --------------------------------------------------- #
-    def _on_start_change(self) -> None:
-        self._auto_end_date()
-        self._schedule_draft_save()
-
-    def _auto_end_date(self) -> None:
-        """Recalculate the end date whenever start date or duration changes."""
-        start = self.form["start_date"].get()
-        end = utils.calculate_end_date(start, self.duration_var.get())
-        if end:
-            self.form["end_date"].set(end)
-
-    def _collect(self) -> Dict[str, str]:
-        """Gather the current form values into a plain dict."""
-        return {
-            "candidate_name": self.form["candidate_name"].get().strip(),
-            "position": self.form["position"].get().strip(),
-            "department": "",
-            "course": "",
-            "college": self.form["college"].get().strip(),
-            "issue_date": self.form["issue_date"].get().strip(),
-            "start_date": self.form["start_date"].get().strip(),
-            "end_date": self.form["end_date"].get().strip(),
-            "duration": self.duration_var.get(),
-            "email": self.form["email"].get().strip(),
-            "template": self.template_var.get(),
-        }
-
-    def _populate(self, data: Dict[str, str]) -> None:
-        """Fill the form from a data dict (used by draft / duplicate / recent)."""
-        for key in ("candidate_name", "college", "email"):
-            entry = self.form[key]
-            entry.delete(0, "end")
-            entry.insert(0, data.get(key, ""))
-        self.form["position"].set(data.get("position", ""))
-        self.form["issue_date"].set(data.get("issue_date", ""))
-        self.form["start_date"].set(data.get("start_date", ""))
-        self.form["end_date"].set(data.get("end_date", ""))
-        if data.get("duration"):
-            self.duration_var.set(data["duration"])
-        if data.get("template"):
-            self.template_var.set(data["template"])
-
-    def _reset_form(self) -> None:
-        for key in ("candidate_name", "college", "email"):
-            self.form[key].delete(0, "end")
-        self.form["position"].set("")
-        self.form["start_date"].set("")
-        self.form["end_date"].set("")
-        self.form["issue_date"].set(utils.format_date(datetime.now()))
-        self.duration_var.set("1 Month")
-        self.app_settings.clear_draft()
-
-    # -- auto-save draft (debounced) ------------------------------------- #
-    def _schedule_draft_save(self) -> None:
-        if self._draft_job:
-            self.after_cancel(self._draft_job)
-        self._draft_job = self.after(800, self._save_draft)
-
-    def _save_draft(self) -> None:
-        self._draft_job = None
-        self.app_settings.save_draft(self._collect())
-
-    def _restore_draft(self) -> None:
-        draft = self.app_settings.draft
-        if draft and draft.get("candidate_name"):
-            self._populate(draft)
-
-
-    # -- recent candidates ----------------------------------------------- #
-    def _refresh_recent(self) -> None:
-        for child in self.recent_frame.winfo_children():
-            child.destroy()
-        recents = self.app_settings.recent_candidates
-        if not recents:
-            return
-        ctk.CTkLabel(self.recent_frame, text="Recent Candidates",
-                     font=_font(12, "bold"),
-                     text_color=("#6B7280", "#9CA3AF")).pack(anchor="w", pady=(0, 6))
-        chips = ctk.CTkFrame(self.recent_frame, fg_color="transparent")
-        chips.pack(anchor="w", fill="x")
-        for cand in recents[:6]:
-            name = cand.get("candidate_name", "?")
-            ctk.CTkButton(
-                chips, text=f"  {name}  ", height=32, corner_radius=16,
-                font=_font(11), fg_color=("#EFF3FF", "#1E293B"),
-                hover_color=("#DCE6FF", "#27364B"), text_color=ACCENT,
-                command=lambda c=cand: (self._populate(c), self.show_page("new")),
-            ).pack(side="left", padx=(0, 6))
-
-    def _duplicate_last(self) -> None:
-        recents = self.app_settings.recent_candidates
-        if not recents:
-            ModernDialog(self, "Nothing to Duplicate",
-                         "No previous letters found yet.", icon="🗐")
-            return
-        self._populate(recents[0])
-
-    # -- generation core -------------------------------------------------- #
-    def _validate_or_warn(self, data: Dict[str, str]) -> bool:
-        ok, errors = utils.validate_form(data)
-        if not ok:
-            ModernDialog(self, "Please Check the Form", "\n".join(errors),
-                         icon="⚠")
-        return ok
-
-    def _issue_year(self, data: Dict[str, str]) -> int:
-        parsed = utils.parse_date(data.get("issue_date", ""))
-        return parsed.year if parsed else datetime.now().year
-
-    def _resolve_intern_id(self, data: Dict[str, str], consume: bool) -> str:
-        """Reuse the same Intern ID for a known name, else allocate a new one.
-
-        ``consume=False`` (preview) peeks without allocating.
-        """
-        existing = self.db.get_by_name(data.get("candidate_name", ""))
-        if existing and existing.get("intern_id"):
-            return existing["intern_id"]
-        if consume:
-            return self.db.next_intern_id(self._issue_year(data))
-        return self.db.peek_next_intern_id(self._issue_year(data))
-
-    def _prepare_doc(self, data: Dict[str, str], consume: bool) -> None:
-        """Fill Intern ID, duration and (for certificates) the certificate no."""
-        data["intern_id"] = self._resolve_intern_id(data, consume)
-        if not data.get("duration"):
-            data["duration"] = utils.duration_between(
-                data.get("start_date", ""), data.get("end_date", ""))
-        if doc_router.is_landscape_cert(data.get("template", "")):
-            year = self._issue_year(data)
-            data["cert_no"] = (self.cert_store.next_cert_no(year) if consume
-                               else self.cert_store.peek_next_cert_no(year))
-
-    def _record_intern(self, data: Dict[str, str], path: Path) -> None:
-        """Persist a generated-document record to the local SQLite database."""
-        self.db.add_record({
-            "intern_id": data.get("intern_id", ""),
-            "candidate_name": data.get("candidate_name", ""),
-            "position": data.get("position", ""),
-            "domain": data.get("department", ""),
-            "issue_date": data.get("issue_date", ""),
-            "start_date": data.get("start_date", ""),
-            "end_date": data.get("end_date", ""),
-            "duration": data.get("duration", ""),
-            "pdf_path": str(path),
-            "status": "Generated",
-        })
-        # Completion certificates also get a certificate record.
-        if doc_router.is_landscape_cert(data.get("template", "")):
-            self.cert_store.add_record({**data, "pdf_path": str(path),
-                                        "status": "Completed"})
-
-    def _render(self, path: Path, data: Dict[str, str]) -> None:
-        doc_router.render(path, self.company.data, data, data["template"],
-                          BASE_DIR, self.pdf)
-
-    def _generate(self) -> None:
-        data = self._collect()
-        if not self._validate_or_warn(data):
-            return
-        self._prepare_doc(data, consume=True)
-        folder = Path(self.app_settings.last_output_folder)
-        base = utils.build_filename(
-            data["candidate_name"], doc_router.filename_suffix(data["template"]))
-        path = utils.unique_path(folder, base)
-        try:
-            self._render(path, data)
-        except Exception as exc:  # pragma: no cover - defensive
-            ModernDialog(self, "Generation Failed", str(exc), icon="❌")
-            return
-
-        self.app_settings.add_recent_candidate(data)
-        self.app_settings.clear_draft()
-        self._record_intern(data, path)
-        self._refresh_recent()
-        self._success_dialog(path, data.get("intern_id", ""))
-
-    def _preview(self) -> None:
-        """Render to a temp file and open it without touching the output dir."""
-        data = self._collect()
-        if not self._validate_or_warn(data):
-            return
-        self._prepare_doc(data, consume=False)
-        tmp_dir = Path(tempfile.gettempdir())
-        path = tmp_dir / f"preview_{utils.sanitize_filename(data['candidate_name'])}.pdf"
-        try:
-            self._render(path, data)
-            utils.open_file(path)
-        except Exception as exc:  # pragma: no cover
-            ModernDialog(self, "Preview Failed", str(exc), icon="❌")
-
-    def _save_as(self) -> None:
-        data = self._collect()
-        if not self._validate_or_warn(data):
-            return
-        self._prepare_doc(data, consume=True)
-        base = utils.build_filename(
-            data["candidate_name"], doc_router.filename_suffix(data["template"]))
-        dest = filedialog.asksaveasfilename(
-            defaultextension=".pdf", initialfile=f"{base}.pdf",
-            filetypes=[("PDF Document", "*.pdf")],
-            initialdir=self.app_settings.last_output_folder,
-        )
-        if not dest:
-            return
-        dest_path = Path(dest)
-        try:
-            self._render(dest_path, data)
-        except Exception as exc:  # pragma: no cover
-            ModernDialog(self, "Save Failed", str(exc), icon="❌")
-            return
-        self.app_settings.last_output_folder = str(dest_path.parent)
-        self.app_settings.add_recent_candidate(data)
-        self._record_intern(data, dest_path)
-        self._refresh_recent()
-        self._success_dialog(dest_path, data.get("intern_id", ""))
-
-    def _success_dialog(self, path: Path, intern_id: str = "") -> None:
-        msg = f"Saved as {path.name}"
-        if intern_id:
-            msg += f"\nIntern ID: {intern_id}"
-        ModernDialog(
-            self, "Offer Letter Generated", msg,
-            icon="✅",
-            actions=[
-                ("Open PDF", lambda: utils.open_file(path), True),
-                ("Open Folder", lambda: utils.reveal_in_folder(path), False),
-                ("Generate Another", self._reset_form, False),
-            ],
-        )
 
     # ================================================================== #
     # PAGE: Company Settings
@@ -940,8 +669,8 @@ class OfferLetterApp(ctk.CTk):
     def _build_verify_page(self) -> ctk.CTkFrame:
         page = self._page_shell(
             "Intern Verification",
-            "Look up any generated offer letter by its Intern ID. Works fully "
-            "offline.")
+            "Look up any generated document by its Intern ID or Certificate "
+            "No. Works fully offline.")
 
         # Search row
         bar = ctk.CTkFrame(page, fg_color="transparent")
@@ -949,9 +678,11 @@ class OfferLetterApp(ctk.CTk):
         bar.grid_columnconfigure(0, weight=1)
 
         self.verify_var = ctk.StringVar()
-        entry = ctk.CTkEntry(bar, textvariable=self.verify_var, height=44,
-                             corner_radius=CORNER, font=_font(13),
-                             placeholder_text="Enter Intern ID  (e.g. SO260015)")
+        entry = ctk.CTkEntry(
+            bar, textvariable=self.verify_var, height=44,
+            corner_radius=CORNER, font=_font(13),
+            placeholder_text="Enter Intern ID (e.g. SO260015) or Certificate "
+                             "No (e.g. SO-CERT-260001)")
         entry.grid(row=0, column=0, sticky="ew")
         entry.bind("<Return>", lambda e: self._do_verify())
 
@@ -975,33 +706,45 @@ class OfferLetterApp(ctk.CTk):
         ctk.CTkLabel(self.verify_result, text="🔎", font=_font(34)).grid(
             row=0, column=0, pady=(28, 4))
         ctk.CTkLabel(self.verify_result,
-                     text="Enter an Intern ID above and click Verify.",
+                     text="Enter an Intern ID or Certificate No above and "
+                          "click Verify.",
                      font=_font(13), text_color=("#6B7280", "#9CA3AF")).grid(
             row=1, column=0, pady=(0, 28))
 
     def _do_verify(self) -> None:
-        intern_id = self.verify_var.get().strip()
+        query = self.verify_var.get().strip()
         for w in self.verify_result.winfo_children():
             w.destroy()
-        if not intern_id:
+        if not query:
             self._verify_placeholder()
             return
-        record = self.db.get(intern_id)
-        if not record:
-            ctk.CTkLabel(self.verify_result, text="❌", font=_font(34)).grid(
-                row=0, column=0, pady=(28, 4))
-            ctk.CTkLabel(self.verify_result, text="Invalid Intern ID",
-                         font=_font(16, "bold"),
-                         text_color="#DC2626").grid(row=1, column=0)
-            ctk.CTkLabel(self.verify_result,
-                         text=f"No record found for '{intern_id}'.",
-                         font=_font(12),
-                         text_color=("#6B7280", "#9CA3AF")).grid(
-                row=2, column=0, pady=(2, 28))
-            return
-        self._render_verify_record(record)
 
-    def _render_verify_record(self, rec: Dict[str, str]) -> None:
+        # Intern IDs (SO260015) and certificate numbers (SO-CERT-260001) live
+        # in different tables, so try both before reporting a miss.
+        record = self.db.get(query)
+        if record:
+            self._render_verify_record(record)
+            return
+
+        certificate = self.cert_store.find(query)
+        if certificate:
+            self._render_verify_record(certificate, is_certificate=True)
+            return
+
+        ctk.CTkLabel(self.verify_result, text="❌", font=_font(34)).grid(
+            row=0, column=0, pady=(28, 4))
+        ctk.CTkLabel(self.verify_result, text="Invalid ID",
+                     font=_font(16, "bold"),
+                     text_color="#DC2626").grid(row=1, column=0)
+        ctk.CTkLabel(self.verify_result,
+                     text=f"No intern or certificate record found for "
+                          f"'{query}'.",
+                     font=_font(12),
+                     text_color=("#6B7280", "#9CA3AF")).grid(
+            row=2, column=0, pady=(2, 28))
+
+    def _render_verify_record(self, rec: Dict[str, str],
+                              is_certificate: bool = False) -> None:
         # Header strip with verified badge.
         head = ctk.CTkFrame(self.verify_result, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=24, pady=(22, 6))
@@ -1009,23 +752,54 @@ class OfferLetterApp(ctk.CTk):
         ctk.CTkLabel(head, text=rec.get("candidate_name", "—"),
                      font=_font(20, "bold"), anchor="w").grid(
             row=0, column=0, sticky="w")
-        ctk.CTkLabel(head, text="✓ Verified", font=_font(12, "bold"),
+        badge = "✓ Certificate Verified" if is_certificate else "✓ Verified"
+        ctk.CTkLabel(head, text=badge, font=_font(12, "bold"),
                      text_color="#16A34A").grid(row=0, column=1, sticky="e")
 
         grid = ctk.CTkFrame(self.verify_result, fg_color="transparent")
         grid.grid(row=1, column=0, sticky="ew", padx=24, pady=(4, 22))
         grid.grid_columnconfigure((0, 1), weight=1)
 
-        rows = [
-            ("Intern ID", rec.get("intern_id", "")),
-            ("Position", rec.get("position", "")),
-            ("Domain", rec.get("domain", "")),
-            ("Start Date", utils.format_long_date(rec.get("start_date", ""))),
-            ("End Date", utils.format_long_date(rec.get("end_date", ""))),
-            ("Duration", rec.get("duration", "")),
-            ("Status", rec.get("status", "")),
-            ("Generated", rec.get("created_at", "")),
-        ]
+        if is_certificate:
+            rows = [
+                ("Certificate No", rec.get("cert_no", "")),
+                ("Certificate Type", rec.get("cert_type", "")
+                 or "Completion Certificate"),
+                ("Intern ID", rec.get("intern_id", "")),
+                ("Position", rec.get("position", "")),
+                ("Issue Date", utils.format_long_date(rec.get("issue_date", ""))),
+                ("Start Date", utils.format_long_date(rec.get("start_date", ""))),
+                ("End Date", utils.format_long_date(rec.get("end_date", ""))),
+                ("Duration", rec.get("duration", "")),
+                ("Status", rec.get("status", "")),
+            ]
+            # Optional certificate details.
+            for label, key in (("Program", "program"),
+                               ("Department", "department"),
+                               ("Grade", "grade"), ("Remarks", "remarks")):
+                if rec.get(key):
+                    rows.append((label, rec.get(key, "")))
+            rows.append(("Issued On", rec.get("created_at", "")))
+        else:
+            rows = [
+                ("Intern ID", rec.get("intern_id", "")),
+                ("Position", rec.get("position", "")),
+                ("Domain", rec.get("domain", "")),
+                ("Start Date", utils.format_long_date(rec.get("start_date", ""))),
+                ("End Date", utils.format_long_date(rec.get("end_date", ""))),
+                ("Duration", rec.get("duration", "")),
+                ("Status", rec.get("status", "")),
+                ("Generated", rec.get("created_at", "")),
+            ]
+            # Surface any certificate numbers issued to this intern so they can
+            # be verified directly.
+            certs = self.cert_store.certs_for_intern(rec.get("intern_id", ""))
+            if certs:
+                numbers = ", ".join(
+                    c.get("cert_no", "") for c in certs if c.get("cert_no"))
+                label = ("Certificate No" if len(certs) == 1
+                         else f"Certificates ({len(certs)})")
+                rows.insert(1, (label, numbers))
         for i, (label, value) in enumerate(rows):
             r, col = divmod(i, 2)
             cell = ctk.CTkFrame(grid, fg_color="transparent")
@@ -1033,74 +807,33 @@ class OfferLetterApp(ctk.CTk):
             ctk.CTkLabel(cell, text=label.upper(), font=_font(10, "bold"),
                          text_color=("#9CA3AF", "#6B7280"), anchor="w").pack(
                 anchor="w")
-            ctk.CTkLabel(cell, text=value or "—", font=_font(13), anchor="w").pack(
-                anchor="w")
+            # IDs are the values people actually need to copy.
+            if value and label in ("Intern ID", "Certificate No",
+                                   "Certificates"):
+                line = ctk.CTkFrame(cell, fg_color="transparent")
+                line.pack(anchor="w")
+                ctk.CTkLabel(line, text=value, font=_font(13),
+                             anchor="w").pack(side="left", padx=(0, 6))
+                copy_button(line, value, width=26, height=22).pack(side="left")
+            else:
+                ctk.CTkLabel(cell, text=value or "—", font=_font(13),
+                             anchor="w").pack(anchor="w")
 
         # PDF file row with open button.
-        pdf_path = rec.get("pdf_path", "")
+        stored = rec.get("pdf_path", "")
+        pdf_path = resolve_path(stored) if stored else None
         foot = ctk.CTkFrame(self.verify_result, fg_color="transparent")
         foot.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 22))
         foot.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(foot, text=f"📄  {Path(pdf_path).name if pdf_path else '—'}",
+        ctk.CTkLabel(foot, text=f"📄  {pdf_path.name if pdf_path else '—'}",
                      font=_font(12), text_color=("#6B7280", "#9CA3AF"),
                      anchor="w").grid(row=0, column=0, sticky="w")
-        if pdf_path and Path(pdf_path).exists():
+        if pdf_path and pdf_path.exists():
             ctk.CTkButton(foot, text="Open PDF",
                           command=lambda: utils.open_file(pdf_path),
                           height=34, width=110, corner_radius=CORNER,
                           font=_font(12, "bold"), fg_color=ACCENT,
                           hover_color=ACCENT_HOVER).grid(row=0, column=1)
-
-    # ================================================================== #
-    # PAGE: Templates
-    # ================================================================== #
-    def _build_templates_page(self) -> ctk.CTkFrame:
-        page = self._page_shell(
-            "Templates",
-            "Choose a template here and it becomes the active layout for new "
-            "letters.")
-
-        grid = ctk.CTkFrame(page, fg_color="transparent")
-        grid.grid(row=2, column=0, sticky="ew", padx=40, pady=16)
-        for c in range(3):
-            grid.grid_columnconfigure(c, weight=1)
-
-        descriptions = {
-            "Internship Offer": "Offer an internship with role and duration.",
-            "Full-Time Offer": "Formal full-time employment offer.",
-            "Appointment Letter": "Confirm an appointment to a role.",
-            "Internship Certificate": "Certify a completed internship.",
-            "Completion Certificate": "Recognise program completion.",
-            "Experience Letter": "Certify past employment and tenure.",
-            "Relieving Letter": "Confirm relieving from duties.",
-            "Appreciation Certificate": "Recognise outstanding contribution.",
-            "NDA": "Non-disclosure agreement for confidentiality.",
-        }
-
-        for i, label in enumerate(doc_router.DOC_TYPES):
-            r, col = divmod(i, 3)
-            card = ctk.CTkFrame(grid, corner_radius=16,
-                                fg_color=("#FFFFFF", "#161616"),
-                                border_width=1,
-                                border_color=("#ECECEC", "#242424"))
-            card.grid(row=r, column=col, sticky="nsew", padx=8, pady=8)
-            ctk.CTkLabel(card, text="📄", font=_font(28)).pack(pady=(18, 4))
-            ctk.CTkLabel(card, text=label, font=_font(14, "bold")).pack()
-            ctk.CTkLabel(card, text=descriptions.get(label, ""), font=_font(11),
-                         text_color=("#6B7280", "#9CA3AF"), wraplength=200,
-                         justify="center").pack(padx=14, pady=(4, 10))
-
-            def use(lbl=label):
-                self.template_var.set(lbl)
-                self.show_page("new")
-                ModernDialog(self, "Template Selected",
-                             f"'{lbl}' is now the active template.", icon="🗂")
-
-            ctk.CTkButton(card, text="Use Template", command=use, height=38,
-                          corner_radius=CORNER, font=_font(12, "bold"),
-                          fg_color=ACCENT, hover_color=ACCENT_HOVER).pack(
-                padx=14, pady=(0, 16), fill="x")
-        return page
 
     # ================================================================== #
     # PAGE: Generated Letters
@@ -1134,8 +867,7 @@ class OfferLetterApp(ctk.CTk):
                       fg_color=("#F3F4F6", "#222222"),
                       hover_color=("#E5E7EB", "#2E2E2E"),
                       text_color=("#374151", "#D1D5DB"),
-                      command=lambda: utils.open_file(
-                          self.app_settings.last_output_folder)).grid(
+                      command=lambda: utils.open_file(OUTPUT_DIR)).grid(
             row=0, column=2)
 
         self.generated_list = ctk.CTkScrollableFrame(
@@ -1146,7 +878,7 @@ class OfferLetterApp(ctk.CTk):
         return page
 
     def _list_pdfs(self) -> List[Path]:
-        folders = {OUTPUT_DIR, Path(self.app_settings.last_output_folder)}
+        folders = {OUTPUT_DIR}
         files: List[Path] = []
         for folder in folders:
             if folder.exists():
@@ -1191,12 +923,15 @@ class OfferLetterApp(ctk.CTk):
         ctk.CTkLabel(card, text="📄", font=_font(22)).grid(
             row=0, column=0, rowspan=2, padx=(16, 8), pady=10)
 
-        candidate = self._candidate_from_filename(path)
         ctk.CTkLabel(card, text=path.name, font=_font(13, "bold"),
                      anchor="w").grid(row=0, column=1, sticky="w", pady=(10, 0))
         modified = datetime.fromtimestamp(path.stat().st_mtime).strftime(
             "%d %b %Y, %H:%M")
-        ctk.CTkLabel(card, text=f"{candidate}   •   {modified}",
+        try:
+            folder = path.parent.relative_to(OUTPUT_DIR)
+        except ValueError:
+            folder = path.parent
+        ctk.CTkLabel(card, text=f"{folder}   •   {modified}",
                      font=_font(11), text_color=("#6B7280", "#9CA3AF"),
                      anchor="w").grid(row=1, column=1, sticky="w", pady=(0, 10))
 
@@ -1218,75 +953,9 @@ class OfferLetterApp(ctk.CTk):
         mk("Open", lambda: utils.open_file(path))
         mk("Reveal", lambda: utils.reveal_in_folder(path))
         mk("Delete", lambda: self._delete_pdf(path), danger=True)
-
-        # "Generate another" - reuse this candidate's stored data.
-        another = ctk.CTkFrame(right, fg_color="transparent")
-        another.pack(anchor="e", pady=(6, 0))
-        ctk.CTkLabel(another, text="Generate another:", font=_font(10),
-                     text_color=("#6B7280", "#9CA3AF")).pack(side="left",
-                                                             padx=(0, 6))
-        var = ctk.StringVar(value=doc_router.DOC_TYPES[0])
-        ctk.CTkOptionMenu(another, values=doc_router.DOC_TYPES, variable=var,
-                          width=190, height=30, corner_radius=8, font=_font(11),
-                          fg_color=ACCENT, button_color=ACCENT,
-                          button_hover_color=ACCENT_HOVER).pack(side="left")
-        ctk.CTkButton(
-            another, text="Create", width=66, height=30, corner_radius=8,
-            font=_font(11, "bold"), fg_color=ACCENT, hover_color=ACCENT_HOVER,
-            command=lambda c=candidate, v=var: self._generate_another(c, v.get()),
-        ).pack(side="left", padx=(6, 0))
-
-    @staticmethod
-    def _candidate_from_filename(path: Path) -> str:
-        """Best-effort candidate name from a generated file name."""
-        stem = path.stem
-        for suffix in ("_Offer_Letter", "_Certificate_of_Completion",
-                       "_Internship_Certificate"):
-            if suffix in stem:
-                stem = stem.split(suffix)[0]
-                break
-        # Drop a trailing duplicate marker like (1).
-        import re
-        stem = re.sub(r"\(\d+\)$", "", stem)
-        return stem.replace("_", " ").strip()
-
-    def _generate_another(self, candidate: str, template: str) -> None:
-        """Generate a different document for an existing candidate, reusing
-        their stored data and Intern ID."""
-        rec = self.db.get_by_name(candidate)
-        if not rec:
-            ModernDialog(self, "No Stored Data",
-                         f"No saved record found for '{candidate}' to reuse. "
-                         f"Generate their first document from the New Letter "
-                         f"page.", icon="⚠")
-            return
-        data = {
-            "candidate_name": rec.get("candidate_name", ""),
-            "position": rec.get("position", ""),
-            "department": rec.get("domain", ""),
-            "college": "", "email": "",
-            "issue_date": utils.format_date(datetime.now()),
-            "start_date": rec.get("start_date", ""),
-            "end_date": rec.get("end_date", ""),
-            "duration": rec.get("duration", ""),
-            "template": template,
-        }
-        self._prepare_doc(data, consume=True)
-        base = utils.build_filename(data["candidate_name"],
-                                    doc_router.filename_suffix(template))
-        path = utils.unique_path(OUTPUT_DIR, base)
-        try:
-            self._render(path, data)
-        except Exception as exc:
-            ModernDialog(self, "Generation Failed", str(exc), icon="❌")
-            return
-        self._record_intern(data, path)
-        self._refresh_generated()
-        ModernDialog(
-            self, f"{template} Generated",
-            f"Saved as {path.name}\nIntern ID: {data['intern_id']}", icon="✅",
-            actions=[("Open PDF", lambda: utils.open_file(path), True),
-                     ("Open Folder", lambda: utils.reveal_in_folder(path), False)])
+        # Issuing another document for someone lives on the Interns page,
+        # where it is keyed on the Intern ID instead of guessed from a
+        # file name.
 
     def _delete_pdf(self, path: Path) -> None:
         def do_delete():
@@ -1312,8 +981,11 @@ class OfferLetterApp(ctk.CTk):
         card.grid(row=2, column=0, sticky="ew", padx=40, pady=16)
 
         ctk.CTkLabel(card, text="📄", font=_font(48)).pack(pady=(28, 6))
-        ctk.CTkLabel(card, text="Offer Letter Generator",
+        ctk.CTkLabel(card, text=settings.APP_NAME,
                      font=_font(22, "bold")).pack()
+        ctk.CTkLabel(card, text=f"Version {settings.APP_VERSION}",
+                     font=_font(11),
+                     text_color=("#9CA3AF", "#6B7280")).pack(pady=(2, 0))
         ctk.CTkLabel(card, text="A polished, offline HR utility for generating "
                      "professional company documents in seconds.",
                      font=_font(13), wraplength=520, justify="center",
@@ -1321,28 +993,64 @@ class OfferLetterApp(ctk.CTk):
                                                              padx=30)
 
         shortcuts = ("Keyboard Shortcuts\n"
-                     "Ctrl + G   Generate PDF\n"
-                     "Ctrl + P   Preview\n"
-                     "Ctrl + S   Save As\n"
-                     "Ctrl + R   Reset Form\n"
-                     "Ctrl + 1…5  Switch pages")
+                     "Ctrl + G   Generate the current document\n"
+                     "Ctrl + R   Reset the form\n"
+                     f"Ctrl + 1…{len(self.NAV_ITEMS)}  Switch pages")
         ctk.CTkLabel(card, text=shortcuts, font=_font(12), justify="left",
-                     text_color=("#374151", "#D1D5DB")).pack(pady=(0, 24))
+                     text_color=("#374151", "#D1D5DB")).pack(pady=(0, 20))
+
+        # Where the data lives. An installed copy keeps it in AppData rather
+        # than beside the .exe, so it has to be discoverable - this is the
+        # folder to back up, and the one to copy to a new machine.
+        data_box = ctk.CTkFrame(card, fg_color="transparent")
+        data_box.pack(pady=(0, 6), padx=30, fill="x")
+        modes = {
+            "installed": "Installed copy \u2014 your data is kept per user",
+            "portable": "Portable copy \u2014 your data travels with this folder",
+            "source": "Running from source",
+            "custom": "Data folder set by CERTIFLOW_DATA",
+        }
+        ctk.CTkLabel(data_box,
+                     text=modes.get(settings.DATA_MODE, settings.DATA_MODE),
+                     font=_font(11, "bold"),
+                     text_color=("#374151", "#D1D5DB")).pack()
+        ctk.CTkLabel(data_box, text=str(settings.BASE_DIR), font=_font(10),
+                     wraplength=520, justify="center",
+                     text_color=("#9CA3AF", "#6B7280")).pack(pady=(2, 8))
+        row = ctk.CTkFrame(data_box, fg_color="transparent")
+        row.pack()
+        ctk.CTkButton(
+            row, text="\U0001F4C2  Open Data Folder",
+            command=lambda: utils.reveal_in_folder(settings.BASE_DIR),
+            height=32, width=160, corner_radius=CORNER, font=_font(11, "bold"),
+            fg_color=("#F3F4F6", "#222222"),
+            hover_color=("#E5E7EB", "#2E2E2E"),
+            text_color=("#374151", "#D1D5DB")).grid(row=0, column=0, padx=4)
+        copy_button(row, lambda: str(settings.BASE_DIR), width=32, height=32,
+                    tooltip="Copy data folder path").grid(row=0, column=1,
+                                                          padx=4)
 
         ctk.CTkLabel(card, text="Built with Python, CustomTkinter & ReportLab",
                      font=_font(11), text_color=("#9CA3AF", "#6B7280")).pack(
-            pady=(0, 24))
+            pady=(16, 24))
         return page
 
     # ------------------------------------------------------------------ #
     # Keyboard shortcuts
     # ------------------------------------------------------------------ #
     def _bind_shortcuts(self) -> None:
-        self.bind("<Control-g>", lambda e: self._generate())
-        self.bind("<Control-p>", lambda e: self._preview())
-        self.bind("<Control-s>", lambda e: self._save_as())
-        self.bind("<Control-r>", lambda e: self._reset_form())
-        pages = ["new", "bulk", "verify", "company",
-                 "templates", "generated", "about"]
-        for i, key in enumerate(pages, start=1):
+        # Actions are delegated to whichever page owns them, so a shortcut can
+        # never call into a page that no longer exists.
+        self.bind("<Control-g>", lambda e: self._page_action("create", "_issue"))
+        self.bind("<Control-r>", lambda e: self._page_action("create", "_reset"))
+        for i, (_label, key) in enumerate(self.NAV_ITEMS, start=1):
             self.bind(f"<Control-Key-{i}>", lambda e, k=key: self.show_page(k))
+
+    def _page_action(self, page_key: str, method: str) -> None:
+        """Run an action on a page, switching to it first."""
+        page = self.pages.get(page_key)
+        handler = getattr(page, method, None)
+        if handler is None:
+            return
+        self.show_page(page_key)
+        handler()

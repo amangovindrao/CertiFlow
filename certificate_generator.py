@@ -19,6 +19,7 @@ Contents
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from datetime import datetime
@@ -34,6 +35,7 @@ from reportlab.platypus import Paragraph
 
 import pdf_generator as pg
 import utils
+from settings import store_path
 
 # Landscape A4 canvas size.
 PAGE_W, PAGE_H = landscape(A4)
@@ -43,6 +45,18 @@ MARGIN = 46
 # --------------------------------------------------------------------------- #
 # Database (reuses the existing interns.db file, adds new tables only)
 # --------------------------------------------------------------------------- #
+def _tune_connection(conn: sqlite3.Connection) -> None:
+    """WAL + busy timeout: this connection shares the file with the intern DB
+    and with the bulk generator's worker thread."""
+    for pragma in ("PRAGMA journal_mode=WAL",
+                   "PRAGMA busy_timeout=5000",
+                   "PRAGMA synchronous=NORMAL"):
+        try:
+            conn.execute(pragma)
+        except sqlite3.Error:
+            pass
+
+
 class CertificateStore:
     """SQLite helper for certificate numbers and records.
 
@@ -56,6 +70,7 @@ class CertificateStore:
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        _tune_connection(self._conn)
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -87,14 +102,55 @@ class CertificateStore:
                 )
                 """
             )
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the first release (idempotent).
+
+        Existing ``interns.db`` files already contain a ``certificates`` table,
+        so new fields have to be added rather than declared.
+        """
+        with self._lock, self._conn:
+            existing = {r["name"] for r in self._conn.execute(
+                "PRAGMA table_info(certificates)")}
+            for column in ("cert_type", "program", "department"):
+                if column not in existing:
+                    self._conn.execute(
+                        f"ALTER TABLE certificates ADD COLUMN {column} TEXT")
+        self._migrate_paths()
+
+    def _migrate_paths(self) -> None:
+        """Convert absolute pdf_path values inside the project to relative."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT cert_no, pdf_path FROM certificates "
+                "WHERE pdf_path IS NOT NULL AND pdf_path != ''").fetchall()
+        updates = []
+        for row in rows:
+            stored = store_path(row["pdf_path"])
+            if stored != row["pdf_path"]:
+                updates.append((stored, row["cert_no"]))
+        if not updates:
+            return
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "UPDATE certificates SET pdf_path = ? WHERE cert_no = ?",
+                updates)
 
     @staticmethod
-    def _prefix_for(year: Optional[int]) -> str:
-        year = year or datetime.now().year
-        return f"SO-CERT-{year % 100:02d}"
+    def _prefix_for(year: Optional[int], kind: str = "CERT") -> str:
+        """Return the counter prefix, e.g. ``SO-CERT-26`` or ``SO-INT-26``.
 
-    def peek_next_cert_no(self, year: Optional[int] = None) -> str:
-        prefix = self._prefix_for(year)
+        ``kind`` keeps each certificate family on its own sequence so an
+        internship certificate never borrows a completion certificate's number.
+        """
+        year = year or datetime.now().year
+        kind = (kind or "CERT").strip().upper() or "CERT"
+        return f"SO-{kind}-{year % 100:02d}"
+
+    def peek_next_cert_no(self, year: Optional[int] = None,
+                          kind: str = "CERT") -> str:
+        prefix = self._prefix_for(year, kind)
         with self._lock:
             row = self._conn.execute(
                 "SELECT last_num FROM cert_counters WHERE prefix = ?",
@@ -102,8 +158,9 @@ class CertificateStore:
         last = row["last_num"] if row else 0
         return f"{prefix}{last + 1:04d}"
 
-    def next_cert_no(self, year: Optional[int] = None) -> str:
-        prefix = self._prefix_for(year)
+    def next_cert_no(self, year: Optional[int] = None,
+                     kind: str = "CERT") -> str:
+        prefix = self._prefix_for(year, kind)
         with self._lock, self._conn:
             row = self._conn.execute(
                 "SELECT last_num FROM cert_counters WHERE prefix = ?",
@@ -119,11 +176,36 @@ class CertificateStore:
                 (prefix, num))
         return f"{prefix}{num:04d}"
 
+    def reserve_counter(self, cert_no: str) -> None:
+        """Ensure the allocator never tries to hand out ``cert_no`` again.
+
+        ``next_cert_no`` already skips numbers present in the table, so this is
+        not needed for correctness - but without it an import of a hundred
+        certificates leaves the counter far behind, and every later allocation
+        re-scans from the old value. Mirrors
+        :meth:`InternDatabase.reserve_counter`.
+        """
+        text = (cert_no or "").strip().upper()
+        if len(text) < 5 or not text[-4:].isdigit():
+            return
+        prefix, number = text[:-4], int(text[-4:])
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT last_num FROM cert_counters WHERE prefix = ?",
+                (prefix,)).fetchone()
+            if number > (row["last_num"] if row else 0):
+                self._conn.execute(
+                    "INSERT INTO cert_counters(prefix, last_num) "
+                    "VALUES(?, ?) ON CONFLICT(prefix) DO UPDATE SET "
+                    "last_num = excluded.last_num", (prefix, number))
+
     def add_record(self, record: Dict[str, str]) -> None:
         fields = ("cert_no", "intern_id", "candidate_name", "position",
                   "issue_date", "start_date", "end_date", "duration", "grade",
-                  "remarks", "pdf_path", "status", "created_at")
+                  "remarks", "pdf_path", "status", "created_at", "cert_type",
+                  "program", "department")
         values = [record.get(f, "") for f in fields]
+        values[fields.index("pdf_path")] = store_path(record.get("pdf_path", ""))
         if not record.get("created_at"):
             values[fields.index("created_at")] = datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S")
@@ -138,6 +220,174 @@ class CertificateStore:
                 "SELECT * FROM certificates WHERE UPPER(cert_no) = UPPER(?)",
                 (cert_no.strip(),)).fetchone()
         return dict(row) if row else None
+
+    # ------------------------------------------------------------------ #
+    # Verification helpers
+    # ------------------------------------------------------------------ #
+    # Certificate families, in the order a bare number is guessed.
+    KINDS = ("CERT", "INT")
+
+    @staticmethod
+    def candidate_numbers(value: str) -> List[str]:
+        """Return the certificate numbers a typed ``value`` could mean.
+
+        People rarely type the full ``SO-INT-260031``: they paste it with
+        stray spaces, drop the dashes, or copy only the digits off the PDF.
+        Every sensible spelling is tried before declaring the ID invalid.
+        """
+        raw = (value or "").strip()
+        if not raw:
+            return []
+        squashed = re.sub(r"[\s_]+", "", raw).upper()
+        options = [raw, squashed]
+        no_dash = squashed.replace("-", "")
+        # "SOINT260031" / "SO CERT 260001" -> canonical dashed form.
+        for kind in CertificateStore.KINDS:
+            token = f"SO{kind}"
+            if no_dash.startswith(token):
+                options.append(f"SO-{kind}-{no_dash[len(token):]}")
+        # Bare digits ("260031" or even "0031") -> try each family.
+        digits = re.sub(r"\D", "", squashed)
+        if digits and digits == no_dash:
+            yy = f"{datetime.now().year % 100:02d}"
+            for kind in CertificateStore.KINDS:
+                if len(digits) >= 6:
+                    options.append(f"SO-{kind}-{digits}")
+                elif len(digits) == 4:
+                    options.append(f"SO-{kind}-{yy}{digits}")
+        # De-duplicate while preserving order.
+        seen, unique = set(), []
+        for opt in options:
+            key = opt.upper()
+            if opt and key not in seen:
+                seen.add(key)
+                unique.append(opt)
+        return unique
+
+    def find(self, value: str) -> Optional[Dict[str, str]]:
+        """Look up a certificate by number, tolerating formatting variations."""
+        for candidate in self.candidate_numbers(value):
+            record = self.get(candidate)
+            if record:
+                return record
+        return None
+
+    def certs_for_intern(self, intern_id: str) -> List[Dict[str, str]]:
+        """Every certificate issued to an Intern ID (newest first)."""
+        if not intern_id or not intern_id.strip():
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM certificates WHERE UPPER(intern_id) = UPPER(?) "
+                "ORDER BY created_at DESC", (intern_id.strip(),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def certs_for_name(self, name: str) -> List[Dict[str, str]]:
+        """Certificates matched by candidate name (newest first).
+
+        Used only as a fallback for legacy rows saved before Intern IDs were
+        stored on certificates.
+        """
+        if not name or not name.strip():
+            return []
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM certificates WHERE LOWER(candidate_name) = "
+                "LOWER(?) ORDER BY created_at DESC", (name.strip(),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def cert_of_type(self, intern_id: str, cert_type: str
+                     ) -> Optional[Dict[str, str]]:
+        """An existing certificate of ``cert_type`` for this intern, if any.
+
+        Used to avoid issuing the same person two of the same certificate.
+        Records written before the ``cert_type`` column existed were all
+        completion certificates, hence the NULL/empty handling.
+        """
+        if not intern_id or not intern_id.strip() or not cert_type:
+            return None
+        legacy = cert_type == "Completion Certificate"
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM certificates WHERE UPPER(intern_id) = UPPER(?) "
+                "AND (cert_type = ?" +
+                (" OR cert_type IS NULL OR cert_type = ''" if legacy else "") +
+                ") ORDER BY created_at DESC LIMIT 1",
+                (intern_id.strip(), cert_type)).fetchone()
+        return dict(row) if row else None
+
+    def all_records(self) -> List[Dict[str, str]]:
+        """Every certificate ever issued (newest first)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM certificates ORDER BY created_at DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def count(self) -> int:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT COUNT(*) AS n FROM certificates").fetchone()["n"]
+
+    # ------------------------------------------------------------------ #
+    # Corrections
+    # ------------------------------------------------------------------ #
+    def reassign_intern(self, old_id: str, new_id: str) -> int:
+        """Point every certificate of ``old_id`` at ``new_id``.
+
+        Returns the number of certificate records updated. Certificate numbers
+        are never changed - only the Intern ID they belong to.
+        """
+        old = (old_id or "").strip()
+        new = (new_id or "").strip()
+        if not old or not new or old.upper() == new.upper():
+            return 0
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE certificates SET intern_id = ? WHERE "
+                "UPPER(intern_id) = UPPER(?)", (new, old))
+        return cursor.rowcount
+
+    def set_pdf_path(self, cert_no: str, pdf_path: str) -> bool:
+        """Update where a certificate's PDF lives (after a re-render)."""
+        if not cert_no or not str(cert_no).strip():
+            return False
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE certificates SET pdf_path = ? WHERE UPPER(cert_no) = "
+                "UPPER(?)", (store_path(pdf_path), str(cert_no).strip()))
+        return cursor.rowcount > 0
+
+    # ------------------------------------------------------------------ #
+    # Deletion
+    # ------------------------------------------------------------------ #
+    def delete(self, cert_no: str) -> bool:
+        """Delete one certificate record by number."""
+        if not cert_no or not cert_no.strip():
+            return False
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM certificates WHERE UPPER(cert_no) = UPPER(?)",
+                (cert_no.strip(),))
+        return cursor.rowcount > 0
+
+    def close(self) -> None:
+        """Release the connection. Mirrors :meth:`InternDatabase.close`."""
+        with self._lock:
+            self._conn.close()
+
+    def delete_for_intern(self, intern_id: str) -> int:
+        """Delete every certificate belonging to an Intern ID.
+
+        Returns the number of certificate records removed. Counters are left
+        untouched so a deleted certificate number is never reissued.
+        """
+        if not intern_id or not intern_id.strip():
+            return 0
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM certificates WHERE UPPER(intern_id) = UPPER(?)",
+                (intern_id.strip(),))
+        return cursor.rowcount
 
 
 # --------------------------------------------------------------------------- #

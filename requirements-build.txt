@@ -1,0 +1,9 @@
+# Build-time only. Not needed to run CertiFlow from source.
+#
+#   pip install -r requirements.txt -r requirements-build.txt
+#   python build_icon.py            # only when the branding changes
+#   python -m PyInstaller --noconfirm CertiFlow.spec
+#
+# Pinned: PyInstaller bootloader behaviour and hook contents change between
+# minor releases, and a build that works is worth reproducing exactly.
+pyinstaller==6.16.0

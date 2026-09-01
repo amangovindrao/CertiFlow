@@ -5,7 +5,13 @@ __pycache__/
 .eggs/
 build/
 dist/
+build_log.txt
+package_log.txt
+
+# PyInstaller auto-generates throwaway .spec files, but CertiFlow.spec is the
+# hand-maintained build recipe and must stay in version control.
 *.spec
+!CertiFlow.spec
 
 # ---- Virtual environments ----
 .venv/
@@ -21,10 +27,18 @@ Thumbs.db
 # ---- CertiFlow runtime data (machine-specific, not for version control) ----
 company/*.json
 company/*.db
+company/*.db-wal
+company/*.db-shm
 company/*.tmp
+company/backups/
 logs/*.log
 output/*
 !output/.gitkeep
+
+# User-created backup archives - these contain a full copy of the intern
+# database and every generated document, so they must never be committed.
+Backup & Restore/
+CertiFlow-Backup-*.zip
 
 # Keep the example config and empty folder placeholders
 !company/company.example.json

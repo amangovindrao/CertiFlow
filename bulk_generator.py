@@ -45,6 +45,7 @@ except ImportError:  # xlsx support optional; csv still works.
 # --------------------------------------------------------------------------- #
 # Canonical field -> list of accepted header aliases (lower-cased, stripped).
 COLUMN_ALIASES: Dict[str, List[str]] = {
+    "intern_id": ["intern id", "intern_id", "internid", "id"],
     "candidate_name": ["candidate name", "name", "candidate", "full name"],
     "position": ["position", "role", "designation", "job title"],
     "domain": ["domain", "department", "dept", "team"],
@@ -59,7 +60,17 @@ DISPLAY_COLUMNS: List[Tuple[str, str]] = [
     ("issue_date", "Issue Date"),
     ("start_date", "Start Date"),
     ("end_date", "End Date"),
+    ("intern_id", "Intern ID"),
+    ("issues", "Issues"),
 ]
+
+# Column headers written by :func:`write_sample` and understood by the importer.
+SAMPLE_HEADERS: List[str] = ["Candidate Name", "Position", "Department",
+                             "Issue Date", "Start Date", "End Date",
+                             "Intern ID"]
+
+# Columns the user must not hand-edit in the table (system allocated or derived).
+READONLY_COLUMNS = {"intern_id", "issues"}
 
 
 # --------------------------------------------------------------------------- #
@@ -115,6 +126,11 @@ def _norm_date(value: object) -> str:
     return text  # leave untouched; validation will flag it
 
 
+# Public alias: other modules (intern_io) normalise dates the same way, and
+# reaching for a private name across modules is worse than exporting one.
+normalize_date = _norm_date
+
+
 def _row_from(values: List[object], index: Dict[str, int]) -> Dict[str, str]:
     def cell(field_name: str) -> object:
         i = index.get(field_name)
@@ -127,7 +143,62 @@ def _row_from(values: List[object], index: Dict[str, int]) -> Dict[str, str]:
         "issue_date": _norm_date(cell("issue_date")),
         "start_date": _norm_date(cell("start_date")),
         "end_date": _norm_date(cell("end_date")),
+        # Optional: when a sheet carries a known Intern ID we reuse it as-is
+        # instead of allocating a new one.
+        "intern_id": str(cell("intern_id") or "").strip(),
     }
+
+
+def write_sample(path: str | Path) -> Path:
+    """Write a starter spreadsheet with the exact headers the importer reads.
+
+    Saves people guessing the column names - which is the most common reason an
+    import comes back empty.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    today = datetime.now()
+    example = ["Asha Verma", "AI Agent Developer Intern", "Engineering",
+               utils.format_date(today), "01-07-2026", "30-09-2026", ""]
+
+    if path.suffix.lower() in (".xlsx", ".xlsm"):
+        try:
+            from openpyxl import Workbook
+        except ImportError as exc:                      # pragma: no cover
+            raise ValueError("openpyxl is needed to write an .xlsx sample") \
+                from exc
+        book = Workbook()
+        sheet = book.active
+        sheet.title = "Candidates"
+        sheet.append(SAMPLE_HEADERS)
+        sheet.append(example)
+        for i, header in enumerate(SAMPLE_HEADERS, start=1):
+            sheet.column_dimensions[
+                sheet.cell(row=1, column=i).column_letter].width = \
+                max(len(header) + 4, 14)
+        book.save(path)
+        return path
+
+    with path.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(SAMPLE_HEADERS)
+        writer.writerow(example)
+    return path
+
+
+def zip_folder(folder: str | Path, archive: str | Path) -> Path:
+    """Zip every file in ``folder`` (non-recursive) into ``archive``."""
+    import zipfile
+
+    folder = Path(folder)
+    archive = Path(archive)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    files = sorted(f for f in folder.iterdir()
+                   if f.is_file() and f.suffix.lower() != ".zip")
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file in files:
+            zf.write(file, arcname=file.name)
+    return archive
 
 
 def import_rows(path: str | Path) -> List[Dict[str, str]]:
@@ -266,13 +337,15 @@ class BulkReport:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["Candidate Name", "File", "Status", "Detail",
-                             "Time"])
+            writer.writerow(["Candidate Name", "Intern ID", "Certificate No",
+                             "File", "Status", "Detail", "Time"])
             for r in self.succeeded:
-                writer.writerow([r["candidate_name"], r["file"], "Generated",
+                writer.writerow([r["candidate_name"], r.get("intern_id", ""),
+                                 r.get("cert_no", ""), r["file"], "Generated",
                                  "", r["time"]])
             for r in self.failed:
-                writer.writerow([r["candidate_name"], r.get("file", ""),
+                writer.writerow([r["candidate_name"], r.get("intern_id", ""),
+                                 r.get("cert_no", ""), r.get("file", ""),
                                  "Failed", r.get("error", ""), r["time"]])
 
 
@@ -313,6 +386,8 @@ class BulkGenerator:
             "end_date": row.get("end_date", ""),
             "duration": duration,
             "email": "",
+            # Pre-known Intern ID (rows loaded from the database carry theirs).
+            "intern_id": str(row.get("intern_id", "") or "").strip(),
         }
 
     def generate(self, rows: List[Dict[str, str]], company: Dict,
@@ -339,19 +414,21 @@ class BulkGenerator:
                 data["template"] = template_label
                 parsed = utils.parse_date(data.get("issue_date", ""))
                 year = parsed.year if parsed else datetime.now().year
-                # Reuse an existing Intern ID for a known name, else allocate.
-                if self.db is not None:
+                # Intern ID: trust the one already on the row (candidates
+                # picked from the database), else reuse by name, else allocate.
+                if self.db is not None and not data.get("intern_id"):
                     existing = self.db.get_by_name(name)
                     if existing and existing.get("intern_id"):
                         data["intern_id"] = existing["intern_id"]
                     else:
                         data["intern_id"] = self.db.next_intern_id(year)
-                # Completion certificates need a certificate number.
-                if doc_router.is_landscape_cert(template_label) and \
+                # Every certificate type gets a verifiable certificate number,
+                # drawn from its own family (SO-INT / SO-CERT).
+                if doc_router.is_certificate(template_label) and \
                         self.cert_store is not None:
-                    data["cert_no"] = self.cert_store.next_cert_no(year)
-                base = utils.build_filename(
-                    name, doc_router.filename_suffix(template_label))
+                    data["cert_no"] = self.cert_store.next_cert_no(
+                        year, doc_router.cert_kind(template_label))
+                base = doc_router.filename_base(template_label, name)
                 # unique_path guarantees (1), (2)… - never overwrites.
                 path = utils.unique_path(folder, base)
                 doc_router.render(path, company, data, template_label,
@@ -369,12 +446,18 @@ class BulkGenerator:
                         "pdf_path": str(path),
                         "status": "Generated",
                     })
-                if doc_router.is_landscape_cert(template_label) and \
+                if doc_router.is_certificate(template_label) and \
                         self.cert_store is not None:
-                    self.cert_store.add_record({**data, "pdf_path": str(path),
-                                                "status": "Completed"})
+                    ongoing = doc_router.is_ongoing_cert(template_label)
+                    self.cert_store.add_record({
+                        **data, "pdf_path": str(path),
+                        "cert_type": template_label,
+                        "status": ("Internship Ongoing" if ongoing
+                                   else "Completed")})
                 report.succeeded.append(
-                    {"candidate_name": name, "file": path.name, "time": stamp})
+                    {"candidate_name": name, "file": path.name, "time": stamp,
+                     "intern_id": data.get("intern_id", ""),
+                     "cert_no": data.get("cert_no", "")})
                 self.logger.info("OK   | %-30s | %s", name, path.name)
             except Exception as exc:  # never let one bad row stop the batch
                 report.failed.append(

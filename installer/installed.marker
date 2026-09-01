@@ -1,0 +1,20 @@
+This file marks the CertiFlow installation as an *installed* copy.
+
+It is created by the installer and read by settings.py. Because this file is
+present, CertiFlow keeps your data in your own user profile:
+
+    %LOCALAPPDATA%\CertiFlow
+
+That folder holds the company profile, the intern database, saved designs and
+every generated document. It is deliberately kept out of the program folder so
+that:
+
+  * it is always writable, even when the program lives in Program Files;
+  * each Windows user gets their own private records;
+  * upgrading or uninstalling CertiFlow never touches your data.
+
+The exact path is shown on the About page, with a button to open it.
+
+Deleting this file switches CertiFlow to portable mode, where it looks for data
+beside the .exe instead. Only do that for a copy you have moved onto a USB
+stick - in an installed copy it will simply hide the records you already have.

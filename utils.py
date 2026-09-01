@@ -114,6 +114,94 @@ def calculate_end_date(start: str, duration_label: str) -> str:
     return format_date(end_date)
 
 
+# Number words used for the certificate wording ("a three-month internship").
+_NUMBER_WORDS: Dict[int, str] = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+    7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
+}
+
+
+def months_between(start: str, end: str) -> int:
+    """Whole calendar months covered by the inclusive period ``start``-``end``.
+
+    Uses real calendar arithmetic rather than a 30-day approximation, so
+
+        01 July 2026 -> 30 September 2026   == 3 months (not 2)
+        01 Feb 2026  -> 30 April 2026       == 3 months
+        05 June 2026 -> 04 August 2026      == 2 months
+
+    A month is counted only when it is fully covered.
+    """
+    s, e = parse_date(start), parse_date(end)
+    if s is None or e is None or e < s:
+        return 0
+
+    def covered(n: int) -> bool:
+        # n months starting on ``s`` inclusively end the day before the
+        # matching day-of-month n months later.
+        return _add_months(s, n) - timedelta(days=1) <= e
+
+    months = (e.year - s.year) * 12 + (e.month - s.month)
+    months = max(months, 0)
+    while covered(months + 1):
+        months += 1
+    while months > 0 and not covered(months):
+        months -= 1
+    return months
+
+
+def duration_phrase(start: str, end: str) -> str:
+    """Headline duration for a certificate, e.g. ``"3-Month Internship"``."""
+    months = months_between(start, end)
+    if months >= 1:
+        return f"{months}-Month Internship"
+    s, e = parse_date(start), parse_date(end)
+    if s is None or e is None or e < s:
+        return ""
+    return f"{(e - s).days + 1}-Day Internship"
+
+
+def duration_words(start: str, end: str) -> str:
+    """Duration as an inline adjective, e.g. ``"three-month"``.
+
+    Falls back to digits beyond twelve ("18-month") and to days for periods
+    shorter than a full month.
+    """
+    months = months_between(start, end)
+    if months >= 1:
+        word = _NUMBER_WORDS.get(months)
+        return f"{word}-month" if word else f"{months}-month"
+    s, e = parse_date(start), parse_date(end)
+    if s is None or e is None or e < s:
+        return ""
+    days = (e - s).days + 1
+    word = _NUMBER_WORDS.get(days)
+    return f"{word}-day" if word else f"{days}-day"
+
+
+def is_internship_ongoing(end: str, issue: str) -> bool:
+    """True when the internship is still running on the certificate's issue date.
+
+    Per the certificate rules: an issue date *before* the end date means the
+    internship is ongoing; on or after the end date it has finished.
+    """
+    e, i = parse_date(end), parse_date(issue)
+    if e is None or i is None:
+        return True          # assume ongoing until the dates say otherwise
+    return i < e
+
+
+def validate_internship_dates(start: str, end: str, issue: str) -> List[str]:
+    """Return date problems for an internship certificate (empty = valid)."""
+    errors: List[str] = []
+    s, e, i = parse_date(start), parse_date(end), parse_date(issue)
+    if s and e and s > e:
+        errors.append("• Start Date cannot be after End Date.")
+    if s and i and i < s:
+        errors.append("• Issue Date cannot be before Start Date.")
+    return errors
+
+
 def duration_between(start: str, end: str) -> str:
     """Derive a human friendly duration label from two date strings.
 
@@ -139,6 +227,16 @@ def duration_between(start: str, end: str) -> str:
 # --------------------------------------------------------------------------- #
 # Filename helpers
 # --------------------------------------------------------------------------- #
+def normalize_name(name: str) -> str:
+    """Key used to decide whether two records describe the same person.
+
+    Case-insensitive with surrounding and repeated whitespace collapsed, so
+    ``"  Aakif   Jawaid "`` and ``"aakif jawaid"`` match. Used for reusing an
+    Intern ID and for spotting duplicate intern records.
+    """
+    return " ".join(str(name or "").split()).casefold()
+
+
 def sanitize_filename(name: str) -> str:
     """Make ``name`` safe to use as a file name on every OS."""
     name = name.strip()

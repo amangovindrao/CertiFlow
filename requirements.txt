@@ -3,3 +3,11 @@ reportlab>=4.0.0
 Pillow>=10.0.0
 tkcalendar>=1.6.1
 openpyxl>=3.1.0
+# Renders the PDF to an image for the live certificate preview and PNG/JPG
+# export. BSD/Apache licensed. Optional: without it the app still generates
+# PDFs, only the live preview and image export are disabled.
+pypdfium2==5.13.0
+
+# Optional. Enables drag & drop of image files onto the asset pickers in
+# Company Settings; the app falls back to the Browse button without it.
+# tkinterdnd2>=0.4.2

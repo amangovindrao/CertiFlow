@@ -27,7 +27,6 @@ import customtkinter as ctk
 import bulk_generator as bg
 import doc_router
 import utils
-from pdf_generator import TEMPLATE_LABELS
 from settings import OUTPUT_DIR
 # Shared design tokens / widgets from the main UI module (already imported by
 # the time this page is constructed, so no circular import at runtime).
@@ -62,9 +61,10 @@ class BulkGeneratorPage(ctk.CTkFrame):
         ctk.CTkLabel(self, text="Bulk Generator", font=_font(26, "bold"),
                      anchor="w").grid(row=0, column=0, sticky="w",
                                       padx=40, pady=(30, 0))
-        ctk.CTkLabel(self, text="Import a spreadsheet or add candidates manually "
-                     "below, review and fix rows, then generate every letter at "
-                     "once.", font=_font(13),
+        ctk.CTkLabel(self, text="Import a spreadsheet, add candidates manually, "
+                     "or select existing ones to reuse their Intern ID. Review "
+                     "the rows, then generate every document at once.",
+                     font=_font(13),
                      text_color=("#6B7280", "#9CA3AF"), anchor="w").grid(
             row=1, column=0, sticky="w", padx=40, pady=(2, 10))
 
@@ -83,17 +83,17 @@ class BulkGeneratorPage(ctk.CTkFrame):
             ).grid(row=0, column=col, padx=(0, 6), sticky="w")
 
         tbtn("📥  Import", self._import, 0, primary=True)
-        tbtn("👥  Load Existing", self._load_existing, 1)
-        tbtn("☑  Select All", self._select_all, 2)
+        tbtn("👥  Select Existing", self._load_existing, 1)
+        tbtn("📄  Sample File", self._save_sample, 2)
         tbtn("🗑  Delete", self._delete_selected, 3)
 
         # Template selector (which document to generate for the batch).
         self.template_var = ctk.StringVar(value=doc_router.DOC_TYPES[0])
-        ctk.CTkOptionMenu(
-            bar, values=doc_router.DOC_TYPES, variable=self.template_var,
+        self.type_menu = ctk.CTkOptionMenu(
+            bar, values=doc_router.all_doc_types(), variable=self.template_var,
             height=38, width=170, corner_radius=CORNER, font=_font(12),
-            fg_color=ACCENT, button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-        ).grid(row=0, column=4, padx=(0, 6))
+            fg_color=ACCENT, button_color=ACCENT, button_hover_color=ACCENT_HOVER)
+        self.type_menu.grid(row=0, column=4, padx=(0, 6))
 
         # Filter
         self.filter_var = ctk.StringVar(value="All")
@@ -195,6 +195,8 @@ class BulkGeneratorPage(ctk.CTkFrame):
             "issue_date": self.qa_issue.get().strip(),
             "start_date": self.qa_start.get().strip(),
             "end_date": self.qa_end.get().strip(),
+            # Left blank: allocated (or matched by name) at generation time.
+            "intern_id": "",
         }
         if not row["candidate_name"]:
             ModernDialog(self.app, "Name Required",
@@ -226,10 +228,14 @@ class BulkGeneratorPage(ctk.CTkFrame):
         columns = [f for f, _ in bg.DISPLAY_COLUMNS]
         self.tree = ttk.Treeview(container, columns=columns, show="headings",
                                  selectmode="extended", style="Bulk.Treeview")
+        widths = {"candidate_name": 165, "position": 160, "issue_date": 95,
+                  "start_date": 95, "end_date": 95, "intern_id": 95,
+                  "issues": 190}
         for field_name, label in bg.DISPLAY_COLUMNS:
             self.tree.heading(field_name, text=label,
                               command=lambda c=field_name: self._sort_by(c))
-            self.tree.column(field_name, width=150, anchor="w")
+            self.tree.column(field_name, width=widths.get(field_name, 140),
+                             anchor="w")
 
         self.tree.tag_configure("invalid", background="#FDE2E1",
                                 foreground="#B91C1C")
@@ -242,6 +248,9 @@ class BulkGeneratorPage(ctk.CTkFrame):
         vsb.grid(row=0, column=1, sticky="ns", pady=6, padx=(0, 6))
 
         self.tree.bind("<Double-1>", self._on_double_click)
+        # Ctrl+A selects every row; Delete removes the selection.
+        self.tree.bind("<Control-a>", lambda e: (self._select_all(), "break")[1])
+        self.tree.bind("<Delete>", lambda e: self._delete_selected())
 
     def _style_treeview(self) -> None:
         dark = ctk.get_appearance_mode() == "Dark"
@@ -299,7 +308,11 @@ class BulkGeneratorPage(ctk.CTkFrame):
 
         for idx, row in view:
             tag = "invalid" if idx in self.errors else "valid"
-            values = [row.get(f, "") for f, _ in bg.DISPLAY_COLUMNS]
+            # The Issues column explains the red highlight instead of leaving
+            # the user to guess which field is wrong.
+            issues = ", ".join(self.errors.get(idx, []))
+            values = [issues if field == "issues" else row.get(field, "")
+                      for field, _ in bg.DISPLAY_COLUMNS]
             self.tree.insert("", "end", iid=str(idx), values=values, tags=(tag,))
 
         self._update_status()
@@ -363,43 +376,95 @@ class BulkGeneratorPage(ctk.CTkFrame):
         if children:
             self.tree.selection_set(children)
 
+    def _save_sample(self) -> None:
+        """Save a starter spreadsheet with the headers the importer expects."""
+        dest = filedialog.asksaveasfilename(
+            title="Save sample spreadsheet", defaultextension=".xlsx",
+            initialfile="CertiFlow_candidates_sample.xlsx",
+            filetypes=[("Excel", "*.xlsx"), ("CSV", "*.csv")])
+        if not dest:
+            return
+        try:
+            path = bg.write_sample(dest)
+        except Exception as exc:
+            ModernDialog(self.app, "Could Not Save Sample", str(exc), icon="❌")
+            return
+        ModernDialog(
+            self.app, "Sample Saved",
+            f"{path.name}\n\nColumns: " + " · ".join(bg.SAMPLE_HEADERS) +
+            "\n\nFill it in, then use 📥 Import. Extra columns are ignored and "
+            "the header names are matched case-insensitively.", icon="📄",
+            actions=[("Open", lambda: utils.open_file(path), True),
+                     ("Close", None, False)])
+
     def _load_existing(self) -> None:
-        """Load all previously generated candidates from the database so a
-        different document can be bulk-generated for them."""
+        """Open a picker so several existing interns can be selected; their
+        stored Intern ID and details come along so nothing is re-allocated."""
         db = getattr(self.app, "db", None)
         if db is None:
             ModernDialog(self.app, "Unavailable",
                          "The candidate database is not available.", icon="⚠")
             return
-        records = db.search("")
+        import intern_directory as idir
+        records = idir.load_interns(db, self.app.cert_store)
         if not records:
             ModernDialog(self.app, "No Records",
                          "No previously generated candidates were found yet.",
                          icon="⚠")
             return
-        # De-duplicate by candidate name (keep the most recent record).
-        seen = set()
-        rows: List[Dict[str, str]] = []
-        for rec in records:  # search() returns newest first
-            name = (rec.get("candidate_name") or "").strip()
-            key = name.lower()
-            if not name or key in seen:
-                continue
-            seen.add(key)
-            rows.append({
-                "candidate_name": name,
-                "position": rec.get("position", ""),
-                "domain": rec.get("domain", ""),
-                "issue_date": rec.get("issue_date", ""),
-                "start_date": rec.get("start_date", ""),
-                "end_date": rec.get("end_date", ""),
-            })
-        self.rows = rows
+        idir.InternPickerDialog(self.app, records, self._add_existing_rows,
+                                multi=True)
+
+    def refresh_types(self) -> None:
+        """Pick up designs added or removed in the Template Designer."""
+        types = doc_router.all_doc_types()
+        try:
+            self.type_menu.configure(values=types)
+        except Exception:
+            return
+        if self.template_var.get() not in types:
+            self.template_var.set(types[0])
+
+    def load_intern_rows(self, interns: List[Dict],
+                         template: Optional[str] = None) -> None:
+        """Replace the table with ``interns`` (used by the Interns page)."""
+        import intern_directory as idir
+        self.rows = [idir.intern_to_row(i) for i in interns]
+        if template:
+            self.template_var.set(template)
+        self.search_var.set("")
+        self.filter_var.set("All")
         self._recompute()
         self._render_table()
-        ModernDialog(self.app, "Loaded Existing Candidates",
-                     f"Loaded {len(rows)} candidate(s). Pick a document type "
-                     f"and click Generate All.", icon="👥")
+
+    def _add_existing_rows(self, records: List[Dict[str, str]]) -> None:
+        """Append picked interns to the table, skipping ones already there."""
+        import intern_directory as idir
+        existing_keys = {self._row_key(r) for r in self.rows}
+        added = skipped = 0
+        for rec in records:
+            row = idir.intern_to_row(rec)
+            key = self._row_key(row)
+            if key in existing_keys:
+                skipped += 1
+                continue
+            existing_keys.add(key)
+            self.rows.append(row)
+            added += 1
+
+        self._recompute()
+        self._render_table()
+        msg = (f"Added {added} intern(s) with their existing Intern ID. "
+               f"Pick a document type and click Generate All.")
+        if skipped:
+            msg += f"\n\n{skipped} were already in the list and were skipped."
+        ModernDialog(self.app, "Existing Interns Added", msg, icon="👥")
+
+    @staticmethod
+    def _row_key(row: Dict[str, str]) -> str:
+        """Identity of a table row: Intern ID when known, else the name."""
+        return (row.get("intern_id") or row.get("candidate_name") or
+                "").strip().lower()
 
     def _delete_selected(self) -> None:
         selected = self.tree.selection()
@@ -436,6 +501,14 @@ class BulkGeneratorPage(ctk.CTkFrame):
             return
         col_index = int(col[1:]) - 1
         field_name = bg.DISPLAY_COLUMNS[col_index][0]
+        if field_name in bg.READONLY_COLUMNS:
+            # Intern IDs are allocated by the app - editing one by hand would
+            # silently point the document at the wrong person.
+            ModernDialog(self.app, "Read-only Column",
+                         "Intern IDs are assigned automatically. Use "
+                         "👥 Load Existing to bring in a candidate's saved ID.",
+                         icon="🔒")
+            return
         x, y, w, h = self.tree.bbox(iid, col)
 
         editor = ttk.Entry(self.tree)
@@ -471,16 +544,110 @@ class BulkGeneratorPage(ctk.CTkFrame):
                          "Please complete Company Settings first.", icon="🏢")
             return
         self._recompute()
+        if not self.errors:
+            self._preflight_and_run(list(self.rows))
+            return
         if self.errors:
+            valid = [r for i, r in enumerate(self.rows) if i not in self.errors]
+
+            def review():
+                self.filter_var.set("Invalid")
+                self._render_table()
+
+            actions = [("Review Invalid", review, not valid),
+                       ("Cancel", None, False)]
+            if valid:
+                actions.insert(0, (f"Generate {len(valid)} Valid",
+                                   lambda: self._preflight_and_run(valid),
+                                   True))
             ModernDialog(
-                self.app, "Fix Invalid Rows",
-                f"{len(self.errors)} row(s) have errors and are highlighted. "
-                f"Use the 'Invalid' filter to review and fix them.", icon="⚠")
-            self.filter_var.set("Invalid")
-            self._render_table()
+                self.app, "Some Rows Have Errors",
+                f"{len(self.errors)} of {len(self.rows)} row(s) have problems "
+                f"and are highlighted in red.\n\n"
+                f"You can generate the {len(valid)} valid row(s) now and fix "
+                f"the rest afterwards.", icon="⚠", actions=actions)
             return
 
-        ProgressWindow(self.app, list(self.rows), self.app.company.data,
+    # ------------------------------------------------------------------ #
+    # Duplicate protection
+    # ------------------------------------------------------------------ #
+    def _preflight(self, rows: List[Dict[str, str]], template: str):
+        """Split ``rows`` into what to generate, repeats and already-issued.
+
+        Two rows that resolve to the same person would create two records (or
+        two certificate numbers) in one run, so the later one is treated as a
+        repeat. Interns who already hold this certificate type are reported
+        separately.
+        """
+        unique: List[Dict[str, str]] = []
+        repeats: List[Dict[str, str]] = []
+        seen = set()
+        for row in rows:
+            key = ((row.get("intern_id") or "").strip().upper()
+                   or utils.normalize_name(row.get("candidate_name", "")))
+            if key and key in seen:
+                repeats.append(row)
+                continue
+            if key:
+                seen.add(key)
+            unique.append(row)
+
+        already: List[Dict[str, str]] = []
+        if doc_router.is_certificate(template):
+            store = getattr(self.app, "cert_store", None)
+            db = getattr(self.app, "db", None)
+            if store is not None:
+                for row in unique:
+                    intern_id = (row.get("intern_id") or "").strip()
+                    if not intern_id and db is not None:
+                        match = db.get_by_name(row.get("candidate_name", ""))
+                        intern_id = (match or {}).get("intern_id", "")
+                    if intern_id and store.cert_of_type(intern_id, template):
+                        already.append(row)
+        return unique, repeats, already
+
+    def _preflight_and_run(self, rows: List[Dict[str, str]]) -> None:
+        """Warn about duplicates, then start the batch."""
+        template = self.template_var.get()
+        unique, repeats, already = self._preflight(rows, template)
+        if not repeats and not already:
+            self._run(unique)
+            return
+
+        already_keys = {id(r) for r in already}
+        fresh = [r for r in unique if id(r) not in already_keys]
+
+        def preview(items: List[Dict[str, str]]) -> str:
+            names = ", ".join(r.get("candidate_name", "") for r in items[:4])
+            return names + (", \u2026" if len(items) > 4 else "")
+
+        notes = []
+        if repeats:
+            notes.append(f"\u2022 {len(repeats)} row(s) repeat someone already "
+                         f"in this batch ({preview(repeats)}).")
+        if already:
+            notes.append(f"\u2022 {len(already)} intern(s) already have a "
+                         f"{template} ({preview(already)}).")
+
+        actions = []
+        if fresh:
+            actions.append((f"Generate {len(fresh)} New",
+                            lambda: self._run(fresh), True))
+        actions.append((f"Generate All {len(unique)}",
+                        lambda: self._run(unique), not fresh))
+        actions.append(("Cancel", None, False))
+        ModernDialog(
+            self.app, "Possible Duplicates",
+            "\n".join(notes) +
+            "\n\nGenerating for them again creates a second certificate "
+            "number for the same document.", icon="⚠", actions=actions)
+
+    def _run(self, rows: List[Dict[str, str]]) -> None:
+        if not rows:
+            ModernDialog(self.app, "Nothing to Generate",
+                         "No rows are left to generate.", icon="⚠")
+            return
+        ProgressWindow(self.app, rows, self.app.company.data,
                        self.template_var.get(), on_done=self._after_run)
 
     def _after_run(self) -> None:
@@ -588,8 +755,30 @@ class ProgressWindow(ctk.CTkToplevel):
 
         folder = report.folder if report and report.folder else str(OUTPUT_DIR)
         b("Open Folder", lambda: utils.open_file(folder), primary=True)
+        if ok:
+            b("Zip Batch", lambda: self._zip_batch(folder))
         b("Export Report", self._export_report)
-        b("Generate Again", self.destroy)
+        b("Close", self.destroy)
+
+    def _zip_batch(self, folder: str) -> None:
+        """Bundle the whole batch into one file for handing over."""
+        source = Path(folder)
+        dest = filedialog.asksaveasfilename(
+            title="Save batch as ZIP", defaultextension=".zip",
+            initialfile=f"{source.name}.zip",
+            filetypes=[("ZIP archive", "*.zip")])
+        if not dest:
+            return
+        try:
+            archive = bg.zip_folder(source, Path(dest))
+        except Exception as exc:
+            ModernDialog(self, "Could Not Create ZIP", str(exc), icon="❌")
+            return
+        ModernDialog(
+            self, "Batch Zipped",
+            f"{archive.name}\n{archive.stat().st_size // 1024} KB", icon="🗜",
+            actions=[("Reveal", lambda: utils.reveal_in_folder(archive), True),
+                     ("Close", None, False)])
 
     # -- worker / polling ------------------------------------------------- #
     def _run(self, generator, rows, company, template_label) -> None:
