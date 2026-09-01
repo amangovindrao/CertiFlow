@@ -14,6 +14,10 @@
 [![SQLite](https://img.shields.io/badge/DB-SQLite-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-555)](#-installation)
 [![Offline](https://img.shields.io/badge/Works-100%25%20Offline-2ea44f)](#)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/Release-v1.0.0-brightgreen)](https://github.com/amangovindrao/CertiFlow/releases)
+
+[📥 Download](https://github.com/amangovindrao/CertiFlow/releases) · [📖 Documentation](docs/SETUP.md) · [🐛 Report Bug](https://github.com/amangovindrao/CertiFlow/issues) · [✨ Request Feature](https://github.com/amangovindrao/CertiFlow/issues)
 
 </div>
 
@@ -27,23 +31,51 @@
 
 ---
 
+## 🚀 Quick Start
+
+### For End Users (No Python Needed)
+
+1. **Download**: Get `CertiFlow-1.0.0-Setup.exe` from [Releases](https://github.com/amangovindrao/CertiFlow/releases)
+2. **Install**: Run the installer (click "More info" → "Run anyway" if SmartScreen appears)
+3. **Configure**: Fill in Company Settings on first launch
+4. **Generate**: Create your first document from the 📄 Create Document page
+
+### For Developers
+
+```bash
+git clone https://github.com/amangovindrao/CertiFlow.git
+cd CertiFlow
+python -m venv .venv && .venv\Scripts\activate  # Windows
+pip install -r requirements.txt
+python app.py
+```
+
+---
+
 ## 📑 Table of Contents
 
+- [Quick Start](#-quick-start)
 - [Features](#-features)
-- [Preview](#-preview)
+- [UI Preview](#-ui-preview)
 - [How It Works](#-how-it-works)
 - [Architecture](#-architecture)
 - [Tech Stack](#-tech-stack)
 - [Installation](#-installation)
-- [Building a Windows .exe](#-building-a-windows-exe) · [full guide → SETUP.md](docs/SETUP.md)
+  - [Pre-Built Executable](#option-1-pre-built-executable-recommended-for-end-users)
+  - [Run from Source](#option-2-run-from-source-for-developers)
+  - [First-Time Setup](#first-time-setup)
+  - [System Requirements](#system-requirements)
+  - [Troubleshooting](#troubleshooting-installation)
+- [Building the Executable](#-building-a-windows-exe)
 - [Usage](#-usage)
 - [Document Types](#-document-types)
 - [Intern ID System](#-intern-id-system)
+- [Backup & Data Transfer](#-backup-restore-and-moving-between-computers)
 - [Project Structure](#-project-structure)
 - [Configuration](#-configuration)
 - [Roadmap](#-roadmap)
-- [Contributing](#-contributing)
 - [License](#-license)
+- [Contributing](#-contributing)
 
 ---
 
@@ -72,9 +104,11 @@
 
 ---
 
-## 🖼 Preview
+## 🖼 UI Preview
 
-> The interface uses a sidebar layout with rounded cards, soft borders and a gold/black ScaleOn palette.
+### Main Interface
+
+The interface uses a clean sidebar layout with rounded cards, soft shadows, and a professional gold/black ScaleOn palette. The UI adapts seamlessly between light and dark themes.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -95,7 +129,100 @@
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-*(Add real screenshots to a `docs/` folder and embed them here once captured.)*
+### Key Screens
+
+<details>
+<summary>📄 <strong>Create Document Page</strong> — Generate any document with live preview</summary>
+
+- Select document type (Offer Letter, Internship Certificate, Completion Certificate, or custom templates)
+- Pick an existing intern or enter new details
+- Auto-generated Intern ID with smart name matching
+- Live A4 preview updates as you type
+- Export as PDF, PNG, or JPG
+- All fields validated in real-time
+
+</details>
+
+<details>
+<summary>🎨 <strong>Template Designer</strong> — Build custom layouts visually</summary>
+
+- Drag-and-drop canvas with real-time positioning
+- Start from any built-in template or blank page
+- Add text boxes, images, shapes, QR codes
+- Precise control: font, size, color, alignment, rotation
+- Saved designs become available document types
+- Built-in templates are never modified
+
+</details>
+
+<details>
+<summary>👥 <strong>Interns Directory</strong> — Manage all intern records</summary>
+
+- Every intern with certificate count and types
+- One-click generation of additional documents
+- Multi-select delete with confirmation
+- Search and filter by name, ID, domain
+- Export selected records to Excel/CSV/JSON
+- View full history per intern
+
+</details>
+
+<details>
+<summary>⚡ <strong>Bulk Generator</strong> — Process hundreds at once</summary>
+
+- Import from Excel/CSV with validation
+- Type candidates directly in the built-in table
+- Multi-select from existing interns
+- Background generation with progress bar
+- Auto-creates dated folders (e.g., `output/2026-08-30/`)
+- Automatic ZIP of completed batch
+
+</details>
+
+<details>
+<summary>💾 <strong>Backup & Restore</strong> — Complete data migration</summary>
+
+- One-click export of entire application state
+- Shows what's on this machine vs. what's in each backup
+- Import backup from any location
+- Merge or Replace restore modes
+- Integrity verification (SHA-256 per file)
+- Exclude PDFs for smaller archives
+
+</details>
+
+<details>
+<summary>🔎 <strong>Verification Page</strong> — Look up any issued document</summary>
+
+- Search by Intern ID (e.g., SO260001)
+- Displays full candidate details
+- Shows all issued certificates
+- Links to original PDF files
+- Works 100% offline
+
+</details>
+
+<details>
+<summary>📁 <strong>Generated Files</strong> — Document library</summary>
+
+- All PDFs with search and date filtering
+- Sort by name, date, size, or type
+- Open PDF, reveal in folder, or delete
+- Handles both single documents and bulk folders
+- Shows file count and total storage used
+
+</details>
+
+<details>
+<summary>🏢 <strong>Company Settings</strong> — Configure branding</summary>
+
+- Company name, HR details, footer text
+- Upload logo, signature, stamp, watermark
+- Choose footer color and signature font
+- Preview updates instantly
+- Settings persist across sessions
+
+</details>
 
 ---
 
@@ -259,11 +386,42 @@ The one deliberate wrinkle: `ui.py` imports the four page modules **lazily insid
 
 ## 📦 Installation
 
-> **Just want to use CertiFlow?** You don't need Python. Grab `CertiFlow-1.0.0-Setup.exe` and run it — no administrator rights required — or unzip the portable build. Step-by-step instructions, including the SmartScreen warning to expect, are in **[SETUP.md](docs/SETUP.md)**.
->
-> The rest of this section is for running from source.
+### Option 1: Pre-Built Executable (Recommended for End Users)
 
-> Requires **Python 3.11 or newer**.
+**No Python required. Just download and run.**
+
+#### Windows Installation
+
+1. **Download the installer**
+   - Go to [Releases](https://github.com/amangovindrao/CertiFlow/releases)
+   - Download `CertiFlow-1.0.0-Setup.exe` (~28 MB)
+
+2. **Run the installer**
+   - Double-click the downloaded file
+   - **Windows SmartScreen warning?** Click "More info" → "Run anyway"
+     - This appears because the .exe is not code-signed (costs $400+/year)
+     - The app is 100% safe and open-source
+   
+3. **Choose install location**
+   - **Default (recommended)**: `%LOCALAPPDATA%\CertiFlow\` (no admin rights needed)
+   - **Custom**: Pick any folder you have write access to
+   
+4. **Launch CertiFlow**
+   - From Start Menu: search "CertiFlow"
+   - Or double-click the desktop icon if you chose to create one
+
+#### Portable Version (No Installation)
+
+Perfect for USB drives or if you don't want to install anything:
+
+1. Download `CertiFlow-1.0.0-portable.zip` (~37 MB)
+2. Unzip to any folder
+3. Run `CertiFlow.exe`
+4. Everything stays in that folder — no registry entries, no AppData
+
+### Option 2: Run from Source (For Developers)
+
+> Requires **Python 3.11 or newer**. Works on Windows, macOS, and Linux.
 
 ```bash
 # 1. Clone the repository
@@ -272,7 +430,9 @@ cd CertiFlow
 
 # 2. (Recommended) create a virtual environment
 python -m venv .venv
-# Windows
+
+# Activate it:
+# Windows (PowerShell/CMD)
 .venv\Scripts\activate
 # macOS / Linux
 source .venv/bin/activate
@@ -284,13 +444,119 @@ pip install -r requirements.txt
 python app.py
 ```
 
-On first launch you'll be guided to **Company Settings** — fill it in once and you're ready to generate.
+On first launch you'll be prompted to complete **Company Settings** — fill it in once and you're ready to generate documents.
+
+### First-Time Setup
+
+When you launch CertiFlow for the first time:
+
+1. **Company Settings prompt appears**
+   - Click "Configure Now" to open Company Settings
+   
+2. **Fill in your organization details:**
+   - Company Name (appears on all documents)
+   - HR Name and Designation
+   - Contact email and phone
+   - Office address
+   
+3. **Upload your branding (optional but recommended):**
+   - **Logo**: Company logo for document header (PNG/JPG)
+   - **Signature**: HR signature image (PNG/JPG)
+   - **Stamp**: Company seal/stamp (PNG with transparency)
+   - **Watermark**: Background watermark (PNG with transparency)
+   
+4. **Click "Save Settings"**
+
+You're all set! Now you can generate documents from any page.
+
+### System Requirements
+
+| Component | Minimum | Recommended |
+|---|---|---|
+| **OS** | Windows 10, macOS 10.15, or Linux | Windows 11, macOS 12+, or recent Ubuntu/Fedora |
+| **RAM** | 2 GB | 4 GB or more |
+| **Storage** | 150 MB for app + 500 MB for data | 1 GB or more for generated documents |
+| **Display** | 1366 × 768 | 1920 × 1080 or higher |
+| **Python** | 3.11+ (source only) | 3.11 or 3.12 |
+
+### Troubleshooting Installation
+
+<details>
+<summary><strong>Windows SmartScreen blocks the installer</strong></summary>
+
+This happens because the .exe is not code-signed (signing certificates cost $400+/year and we're an open-source project).
+
+**To proceed safely:**
+1. Click "More info"
+2. Click "Run anyway"
+3. The app is completely safe and all code is public on GitHub
+
+Alternatively, use the portable version (no SmartScreen warning) or run from source.
+
+</details>
+
+<details>
+<summary><strong>"Python was not found" when running from source</strong></summary>
+
+**Windows:**
+- Download from [python.org](https://www.python.org/downloads/)
+- During installation, check "Add Python to PATH"
+- Restart your terminal after installing
+
+**macOS:**
+```bash
+brew install python@3.11
+```
+
+**Linux:**
+```bash
+sudo apt install python3.11 python3.11-venv  # Ubuntu/Debian
+sudo dnf install python3.11  # Fedora
+```
+
+</details>
+
+<details>
+<summary><strong>pip install fails with "externally-managed-environment"</strong></summary>
+
+You're on Linux with system-managed Python. Use a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+</details>
+
+<details>
+<summary><strong>App opens but shows "Failed to register fonts"</strong></summary>
+
+The font files are missing from `assets/fonts/`. This shouldn't happen in a proper install, but if it does:
+
+1. **From source**: make sure you cloned the full repo with `git clone`
+2. **Portable build**: make sure you extracted the entire ZIP, not just the .exe
+3. **Installed version**: try reinstalling
+
+</details>
+
+<details>
+<summary><strong>Generated PDFs show squares instead of text</strong></summary>
+
+Font embedding failed. Check that all `.ttf` files exist in:
+- Source: `assets/fonts/`
+- Installed: `%LOCALAPPDATA%\CertiFlow\assets\fonts\`
+- Portable: `<unzip_folder>\assets\fonts\`
+
+If missing, reinstall or re-clone.
+
+</details>
 
 ---
 
 ## 🏗 Building a Windows .exe
 
-> Summary below. **[SETUP.md](docs/SETUP.md)** has the full guide: every step with the reasoning behind it, diagrams of the build pipeline and data-location logic, silent-install switches, a release checklist and a troubleshooting section.
+> Summary below. **[docs/SETUP.md](docs/SETUP.md)** has the full guide: every step with the reasoning behind it, diagrams of the build pipeline and data-location logic, silent-install switches, a release checklist and a troubleshooting section.
 
 For machines without Python. One command produces both shareable artefacts:
 
@@ -771,16 +1037,126 @@ Please keep the layered architecture intact (UI → logic → persistence → re
 
 ## 📄 License
 
-Released under the **MIT License** — see [`LICENSE`](LICENSE).
+This project is released under the **MIT License** — see [`LICENSE`](LICENSE) for full details.
 
-The bundled **IBM Plex Sans** font is licensed under the SIL Open Font License 1.1.
+### What This Means
+
+✅ **You can:**
+- Use CertiFlow commercially
+- Modify the source code
+- Distribute your modified versions
+- Use it privately
+
+❌ **You must:**
+- Include the original copyright notice and license
+- Not hold the authors liable for any damages
+
+### Third-Party Licenses
+
+This project includes or depends on the following open-source libraries:
+
+| Component | License | Usage |
+|---|---|---|
+| [IBM Plex Sans](https://github.com/IBM/plex) | SIL Open Font License 1.1 | Bundled font family |
+| [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) | MIT | Modern UI framework |
+| [ReportLab](https://www.reportlab.com/) | BSD-like | PDF generation engine |
+| [Pillow](https://python-pillow.org/) | HPND | Image processing |
+| [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) | Apache 2.0 / BSD-3-Clause | PDF rendering |
+| [openpyxl](https://openpyxl.readthedocs.io/) | MIT | Excel file support |
+| [tkcalendar](https://github.com/j4321/tkcalendar) | GPLv3 | Date picker widget |
+
+All licenses are compatible with this project's MIT license. See individual project pages for their full license texts.
+
+### Font Licensing
+
+- **IBM Plex Sans** (bundled): [SIL OFL 1.1](https://scripts.sil.org/OFL) — free for commercial use, redistributable
+- **System fonts** (Segoe UI, Cambria, Georgia): Used only if available on the user's system; no fonts are extracted or redistributed from proprietary sources
+
+### Trademark Notice
+
+"ScaleOn" and the ScaleOn logo are trademarks of the ScaleOn organization. The branding assets included in this repository are specific to ScaleOn's deployment. If you fork or modify this project for your organization:
+
+1. Replace the branding assets in `assets/logo/`, `assets/watermark/`, etc.
+2. Update `company/company.json` with your organization details
+3. Modify the About page and README to reflect your organization
+
+The software itself remains fully open-source under MIT license.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Whether it's a bug report, feature request, or pull request:
+
+### Reporting Issues
+
+Found a bug? Have a feature idea?
+
+1. Check [existing issues](https://github.com/amangovindrao/CertiFlow/issues) to avoid duplicates
+2. Open a new issue with:
+   - **Bug reports**: Steps to reproduce, expected vs actual behavior, screenshots if relevant
+   - **Feature requests**: Use case, why it would be valuable, proposed behavior
+
+### Contributing Code
+
+1. **Fork the repository** and create a branch for your feature
+2. **Make your changes** with clear, descriptive commits
+3. **Test thoroughly**: Run `python app.py --selftest` and verify the UI
+4. **Update documentation** if you added features or changed behavior
+5. **Submit a pull request** with a clear description of what changed and why
+
+### Development Setup
+
+```bash
+git clone https://github.com/YOUR_USERNAME/CertiFlow.git
+cd CertiFlow
+python -m venv .venv
+.venv\Scripts\activate  # or source .venv/bin/activate on macOS/Linux
+pip install -r requirements.txt -r requirements-build.txt
+python app.py
+```
+
+Run the test suite:
+```bash
+python app.py --selftest
+```
+
+Build the executable:
+```bash
+python tools/package.py
+```
+
+### Code Style
+
+- Follow PEP 8 for Python code
+- Use type hints for function signatures
+- Add docstrings for public functions and classes
+- Keep functions focused and single-purpose
+- Comment non-obvious logic
+
+### Areas Needing Help
+
+- 🌐 **Multi-language support**: UI translation framework
+- 🖥️ **macOS/Linux builds**: PyInstaller recipes and packaging
+- 📱 **Accessibility**: Screen reader support, keyboard navigation improvements
+- 🧪 **Testing**: Unit tests for core modules
+- 📚 **Documentation**: Video tutorials, more examples
 
 ---
 
 <div align="center">
 
-Built with ❤️ for HR teams · **CertiFlow** by [ScaleOn](https://github.com/amangovindrao)
+---
 
-*Scale Beyond Limits*
+### 🌟 Star this project if it helped you!
+
+Built with ❤️ for HR teams everywhere
+
+**CertiFlow** by [ScaleOn](https://github.com/amangovindrao) · *Scale Beyond Limits*
+
+[Report Bug](https://github.com/amangovindrao/CertiFlow/issues) · [Request Feature](https://github.com/amangovindrao/CertiFlow/issues) · [Documentation](docs/SETUP.md)
+
+[![GitHub Stars](https://img.shields.io/github/stars/amangovindrao/CertiFlow?style=social)](https://github.com/amangovindrao/CertiFlow/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/amangovindrao/CertiFlow?style=social)](https://github.com/amangovindrao/CertiFlow/network/members)
 
 </div>
