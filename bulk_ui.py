@@ -118,6 +118,44 @@ class BulkGeneratorPage(ctk.CTkFrame):
             corner_radius=CORNER, font=_font(13, "bold"), fg_color=ACCENT,
             hover_color=ACCENT_HOVER,
         ).grid(row=0, column=8, sticky="e")
+        
+        # Second row: Global issue date and duplicate handling
+        bar2 = ctk.CTkFrame(self, fg_color="transparent")
+        bar2.grid(row=2, column=0, sticky="ew", padx=40, pady=(40, 4))
+        bar2.grid_columnconfigure(2, weight=1)
+        
+        # Global issue date
+        ctk.CTkLabel(bar2, text="Issue Date for All:",
+                     font=_font(11, "bold"),
+                     text_color=("#6B7280", "#9CA3AF")).grid(
+            row=0, column=0, padx=(0, 6), sticky="w")
+        
+        self.global_issue_date = DatePicker(bar2)
+        self.global_issue_date.set(utils.format_date(datetime.now()))
+        self.global_issue_date.grid(row=0, column=1, padx=(0, 16), sticky="w")
+        
+        ctk.CTkButton(
+            bar2, text="Apply to All Rows", command=self._apply_global_issue_date,
+            height=32, corner_radius=CORNER, font=_font(11),
+            fg_color=("#F3F4F6", "#222222"),
+            hover_color=("#E5E7EB", "#2E2E2E"),
+            text_color=("#374151", "#D1D5DB")).grid(
+            row=0, column=2, padx=(0, 24), sticky="w")
+        
+        # Duplicate handling
+        ctk.CTkLabel(bar2, text="If Duplicate:",
+                     font=_font(11, "bold"),
+                     text_color=("#6B7280", "#9CA3AF")).grid(
+            row=0, column=3, padx=(0, 6), sticky="e")
+        
+        self.duplicate_action = ctk.StringVar(value="Skip")
+        ctk.CTkOptionMenu(
+            bar2, values=["Skip", "Replace"], variable=self.duplicate_action,
+            height=32, width=110, corner_radius=CORNER, font=_font(11),
+            fg_color=("#F3F4F6", "#222222"),
+            button_color=ACCENT, button_hover_color=ACCENT_HOVER,
+            text_color=("#374151", "#D1D5DB")).grid(
+            row=0, column=4, sticky="e")
 
     def _build_quick_add(self) -> None:
         """Inline form to type a candidate and add it straight to the list."""
@@ -186,6 +224,37 @@ class BulkGeneratorPage(ctk.CTkFrame):
                                        self.qa_duration.get())
         if end:
             self.qa_end.set(end)
+    
+    def _apply_global_issue_date(self) -> None:
+        """Apply the global issue date to all rows in the table."""
+        date = self.global_issue_date.get().strip()
+        if not date:
+            ModernDialog(self.app, "No Date Selected",
+                         "Please select an issue date first.", icon="⚠")
+            return
+        
+        if not self.rows:
+            ModernDialog(self.app, "No Rows",
+                         "Import or add some candidates first.", icon="⚠")
+            return
+        
+        # Normalize the date
+        normalized = bg._norm_date(date)
+        
+        def apply():
+            for row in self.rows:
+                row["issue_date"] = normalized
+            self._recompute()
+            self._render_table()
+            ModernDialog(self.app, "Date Applied",
+                         f"Set issue date to {normalized} for all {len(self.rows)} rows.",
+                         icon="✅")
+        
+        ModernDialog(
+            self.app, "Apply Issue Date?",
+            f"Set issue date to {normalized} for all {len(self.rows)} candidate(s)?",
+            icon="📅",
+            actions=[("Apply", apply, True), ("Cancel", None, False)])
 
     def _qa_add(self) -> None:
         row = {
@@ -609,12 +678,23 @@ class BulkGeneratorPage(ctk.CTkFrame):
     def _preflight_and_run(self, rows: List[Dict[str, str]]) -> None:
         """Warn about duplicates, then start the batch."""
         template = self.template_var.get()
+        duplicate_mode = self.duplicate_action.get()  # "Skip" or "Replace"
         unique, repeats, already = self._preflight(rows, template)
+        
+        # If Replace mode, include the already-issued ones
+        if duplicate_mode == "Replace" and already:
+            # Mark rows for replacement
+            for row in already:
+                row["_replace_mode"] = True
+            
+            already_keys = set()  # Don't filter them out
+        else:
+            already_keys = {id(r) for r in already}
+        
         if not repeats and not already:
             self._run(unique)
             return
 
-        already_keys = {id(r) for r in already}
         fresh = [r for r in unique if id(r) not in already_keys]
 
         def preview(items: List[Dict[str, str]]) -> str:
@@ -626,21 +706,47 @@ class BulkGeneratorPage(ctk.CTkFrame):
             notes.append(f"\u2022 {len(repeats)} row(s) repeat someone already "
                          f"in this batch ({preview(repeats)}).")
         if already:
-            notes.append(f"\u2022 {len(already)} intern(s) already have a "
-                         f"{template} ({preview(already)}).")
+            if duplicate_mode == "Replace":
+                notes.append(f"\u2022 {len(already)} intern(s) already have a "
+                             f"{template}. Mode: REPLACE - old certificates will be replaced "
+                             f"({preview(already)}).")
+            else:
+                notes.append(f"\u2022 {len(already)} intern(s) already have a "
+                             f"{template}. Mode: SKIP - they will be skipped "
+                             f"({preview(already)}).")
 
         actions = []
-        if fresh:
-            actions.append((f"Generate {len(fresh)} New",
-                            lambda: self._run(fresh), True))
-        actions.append((f"Generate All {len(unique)}",
-                        lambda: self._run(unique), not fresh))
+        
+        if duplicate_mode == "Replace":
+            # In replace mode, include already-issued ones
+            all_to_generate = unique  # This includes those with _replace_mode flag
+            if repeats:
+                actions.append((f"Generate {len(all_to_generate)} (Replace Duplicates)",
+                                lambda: self._run(all_to_generate), True))
+            else:
+                actions.append((f"Generate All {len(all_to_generate)} (Replace Duplicates)",
+                                lambda: self._run(all_to_generate), True))
+        else:
+            # Skip mode - only generate fresh ones
+            if fresh:
+                actions.append((f"Generate {len(fresh)} New",
+                                lambda: self._run(fresh), True))
+            if len(unique) > len(fresh):
+                actions.append((f"Generate All {len(unique)}",
+                                lambda: self._run(unique), False))
+        
         actions.append(("Cancel", None, False))
+        
+        title = "Duplicate Handling" if already else "Possible Duplicates"
         ModernDialog(
-            self.app, "Possible Duplicates",
+            self.app, title,
             "\n".join(notes) +
-            "\n\nGenerating for them again creates a second certificate "
-            "number for the same document.", icon="⚠", actions=actions)
+            ("\n\nREPLACE MODE: Old certificates will be replaced with new ones." 
+             if duplicate_mode == "Replace" and already
+             else "\n\nGenerating for them again creates a second certificate "
+                  "number for the same document."),
+            icon="🔄" if duplicate_mode == "Replace" else "⚠", 
+            actions=actions)
 
     def _run(self, rows: List[Dict[str, str]]) -> None:
         if not rows:

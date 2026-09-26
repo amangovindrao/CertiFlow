@@ -388,6 +388,23 @@ class CertificateStore:
                 "DELETE FROM certificates WHERE UPPER(intern_id) = UPPER(?)",
                 (intern_id.strip(),))
         return cursor.rowcount
+    
+    def delete_cert_of_type(self, intern_id: str, cert_type: str) -> bool:
+        """Delete a specific certificate type for an intern (for replacement).
+        
+        Returns True if a certificate was deleted, False otherwise.
+        Used when generating a replacement certificate.
+        """
+        if not intern_id or not intern_id.strip() or not cert_type:
+            return False
+        legacy = cert_type == "Completion Certificate"
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM certificates WHERE UPPER(intern_id) = UPPER(?) "
+                "AND (cert_type = ?" +
+                (" OR cert_type IS NULL OR cert_type = ''" if legacy else "") +
+                ")", (intern_id.strip(), cert_type))
+        return cursor.rowcount > 0
 
 
 # --------------------------------------------------------------------------- #

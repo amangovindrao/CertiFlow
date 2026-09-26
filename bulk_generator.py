@@ -414,6 +414,10 @@ class BulkGenerator:
                 data["template"] = template_label
                 parsed = utils.parse_date(data.get("issue_date", ""))
                 year = parsed.year if parsed else datetime.now().year
+                
+                # Check if this is a replacement operation
+                replace_mode = row.get("_replace_mode", False)
+                
                 # Intern ID: trust the one already on the row (candidates
                 # picked from the database), else reuse by name, else allocate.
                 if self.db is not None and not data.get("intern_id"):
@@ -422,6 +426,12 @@ class BulkGenerator:
                         data["intern_id"] = existing["intern_id"]
                     else:
                         data["intern_id"] = self.db.next_intern_id(year)
+                
+                # Handle certificate replacement - delete old one first
+                if replace_mode and doc_router.is_certificate(template_label) and \
+                        self.cert_store is not None and data.get("intern_id"):
+                    self.cert_store.delete_cert_of_type(data["intern_id"], template_label)
+                
                 # Every certificate type gets a verifiable certificate number,
                 # drawn from its own family (SO-INT / SO-CERT).
                 if doc_router.is_certificate(template_label) and \
@@ -457,8 +467,10 @@ class BulkGenerator:
                 report.succeeded.append(
                     {"candidate_name": name, "file": path.name, "time": stamp,
                      "intern_id": data.get("intern_id", ""),
-                     "cert_no": data.get("cert_no", "")})
-                self.logger.info("OK   | %-30s | %s", name, path.name)
+                     "cert_no": data.get("cert_no", ""),
+                     "replaced": replace_mode})
+                self.logger.info("OK   | %-30s | %s%s", name, path.name,
+                                " (REPLACED)" if replace_mode else "")
             except Exception as exc:  # never let one bad row stop the batch
                 report.failed.append(
                     {"candidate_name": name, "error": str(exc), "time": stamp})
