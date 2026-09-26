@@ -39,7 +39,7 @@ from settings import store_path
 
 # Landscape A4 canvas size.
 PAGE_W, PAGE_H = landscape(A4)
-MARGIN = 46
+MARGIN = 52
 
 
 # --------------------------------------------------------------------------- #
@@ -533,18 +533,14 @@ class CertificateRenderer:
         c.setFillColor(pg.BLACK)
         c.setFont(pg.FONT_BOLD, 34)
         c.drawCentredString(PAGE_W / 2, y - 34, "Certificate of Completion")
-        # gold accent rule
-        c.setStrokeColor(pg.GOLD)
-        c.setLineWidth(2.5)
-        c.line(PAGE_W / 2 - 120, y - 44, PAGE_W / 2 + 120, y - 44)
 
         issue = data.get("issue_date", "")
         parsed = utils.parse_date(issue)
         year = parsed.year if parsed else datetime.now().year
         company_name = company.get("company_name", "ScaleOn")
         c.setFillColor(pg.GOLD)
-        c.setFont(pg.FONT_REGULAR, 12)
-        c.drawCentredString(PAGE_W / 2, y - 62,
+        c.setFont(pg.FONT_BOLD, 14)
+        c.drawCentredString(PAGE_W / 2, y - 54,
                             f"{company_name} Internship Program {year}")
 
         cy = y - 96
@@ -572,11 +568,10 @@ class CertificateRenderer:
                         size=12.5, leading=19)
 
         appreciation = (
-            f"We sincerely appreciate {name}'s dedication, professionalism and "
-            f"valuable contribution throughout the internship. Their commitment "
-            f"and enthusiasm reflect the highest standards of the "
-            f"{company_name} community. We wish them continued success in all "
-            f"future endeavours.")
+            f"We extend our sincere appreciation to {name} for their exceptional dedication "
+            f"and outstanding contributions during the internship. Their commitment and exemplary "
+            f"work ethic truly embody the core values of {company_name}. We wish them continued "
+            f"success in their professional journey.")
         cy = self._para(c, appreciation, PAGE_W / 2, cy - 10, PAGE_W * 0.78,
                         size=11, leading=17)
 
@@ -594,7 +589,8 @@ class CertificateRenderer:
 
         # Bottom band: signature (left), seal (right), cert no (center).
         base_y = MARGIN + 64
-        self._signature(c, MARGIN + 70, base_y)
+        # Position signature and seal with equal distance from borders (100px from edge)
+        self._signature(c, MARGIN + 100, base_y)
         self._seal(c, PAGE_W - MARGIN - 100, base_y + 30, radius=50)
 
         # Certificate number + issue date (centered footer).
@@ -628,7 +624,7 @@ class CertificateRenderer:
                 pass
         c.setStrokeColor(pg.DARK_GRAY)
         c.setLineWidth(1)
-        c.line(x_center - 80, base_y + 6, x_center + 80, base_y + 6)
+        c.line(x_center - 50, base_y + 6, x_center + 50, base_y + 6)
         c.setFillColor(pg.BLACK)
         c.setFont(pg.FONT_REGULAR, 10)
         c.drawCentredString(x_center, base_y - 8,
